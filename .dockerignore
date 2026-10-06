@@ -1,0 +1,17 @@
+.git
+.github
+.env
+.env.*
+target
+frontend/node_modules
+frontend/dist
+frontend/*.tsbuildinfo
+frontend/test-results
+frontend/playwright-report
+playwright-report
+test-results
+data
+.test-runtime
+*.log
+.idea
+.vscode

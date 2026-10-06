@@ -1,0 +1,75 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: lewdarchive
+      POSTGRES_USER: lewdarchive
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U lewdarchive -d lewdarchive']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command:
+      [redis-server, --appendonly, 'yes', --maxmemory, 256mb, --maxmemory-policy, allkeys-lru]
+    volumes:
+      - rsshub_cache:/data
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+  rsshub:
+    image: diygod/rsshub:chromium-bundled
+    restart: unless-stopped
+    init: true
+    shm_size: 256mb
+    ports:
+      - 127.0.0.1:1200:1200
+    env_file:
+      - path: .env.rsshub
+        required: false
+    environment:
+      NODE_ENV: production
+      CACHE_TYPE: redis
+      REDIS_URL: redis://redis:6379/
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:1200/healthz]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+  app:
+    build: .
+    restart: unless-stopped
+    init: true
+    ports:
+      - 127.0.0.1:8080:8080
+    environment:
+      DATABASE_URL: postgres://lewdarchive:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/lewdarchive
+      API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      MAX_DOWNLOAD_MB: ${MAX_DOWNLOAD_MB:-100}
+      ALLOW_PRIVATE_FEED_HOSTS: rsshub,${ALLOW_PRIVATE_FEED_HOSTS:-}
+      RSSHUB_BASE_URL: ${RSSHUB_BASE_URL:-http://rsshub:1200}
+      RUST_LOG: ${RUST_LOG:-lewdarchive=info,tower_http=info}
+    volumes:
+      - media_data:/data/downloads
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rsshub:
+        condition: service_healthy
+volumes:
+  postgres_data:
+  media_data:
+  rsshub_cache:

@@ -1,0 +1,26 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+!.env.rsshub.example
+
+# Build output and dependencies
+/target/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/*.tsbuildinfo
+
+# Runtime data and test artifacts
+/data/
+/.test-runtime/
+/playwright-report/
+/test-results/
+/frontend/test-results/
+/frontend/playwright-report/
+*.log
+
+# Editor and operating system files
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
