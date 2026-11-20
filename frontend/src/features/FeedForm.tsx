@@ -1,40 +1,40 @@
 import { useState } from 'react';
+import { CategoryField } from './Categories';
 import { useQuery } from '@tanstack/react-query';
 import { Archive, LoaderCircle, Plus } from 'lucide-react';
-import { api, sources } from '../api';
+import { communityApi } from './communityApi';
+import { sources } from '../api';
 import { buildFeedUrl, feedTemplates } from '../feedTemplates';
 import type { FeedTemplate, PawchiveService } from '../feedTemplates';
-import type { Feed } from '../api';
-import { Modal, Toggle } from '../components';
+import { Modal } from '../components';
 export default function FeedForm({
-  feed,
+  error,
+  categories,
   onClose,
   onSubmit,
 }: {
-  feed?: Feed;
+  error?: string;
+  categories?: string[];
   onClose: () => void;
   onSubmit: (data: unknown) => Promise<boolean>;
 }) {
   const [form, setForm] = useState({
-    name: feed?.name || '',
-    url: feed?.url || '',
-    source: feed?.source || 'rss',
-    poll_minutes: feed?.poll_minutes || 15,
-    enabled: feed?.enabled ?? true,
-    notify: feed?.notify ?? true,
-    auto_download: feed?.auto_download ?? false,
+    name: '',
+    url: '',
+    source: 'rss',
+    category: '',
   });
-  const [template, setTemplate] = useState<FeedTemplate>(feed ? 'custom' : 'pawchive');
+  const [template, setTemplate] = useState<FeedTemplate>('pawchive');
   const [identifier, setIdentifier] = useState('');
   const [service, setService] = useState<PawchiveService>('fanbox');
   const [baseOverride, setBaseOverride] = useState<string | null>(null);
   const options = useQuery({
-    queryKey: ['feed-options'],
-    queryFn: () => api<{ rsshub_base_url: string }>('/feed-options'),
-    enabled: !feed && template !== 'custom',
+    queryKey: ['community-feed-options'],
+    queryFn: () => communityApi<{ rsshub_base_url: string }>('/feed-options'),
+    enabled: template !== 'custom',
   });
   const baseUrl = baseOverride ?? options.data?.rsshub_base_url ?? '';
-  const automatic = !feed && template !== 'custom';
+  const automatic = template !== 'custom';
   let generatedUrl = '';
   let urlError = '';
   if (automatic) {
@@ -48,7 +48,7 @@ export default function FeedForm({
   const update = (key: string, value: unknown) => setForm((f) => ({ ...f, [key]: value }));
   return (
     <Modal
-      title={feed ? 'Edit connection' : 'Follow your next discovery.'}
+      title="Follow your next discovery."
       subtitle="Choose a service or paste a custom feed URL."
       onClose={onClose}
     >
@@ -64,6 +64,11 @@ export default function FeedForm({
           }
         }}
       >
+        <CategoryField
+          value={form.category}
+          onChange={(value) => update('category', value)}
+          categories={categories}
+        />
         <div className="form-grid">
           <label className="full">
             Feed name
@@ -76,7 +81,7 @@ export default function FeedForm({
               onChange={(e) => update('name', e.target.value)}
             />
           </label>
-          {!feed && (
+          {
             <label className="full">
               Service
               <select
@@ -94,7 +99,7 @@ export default function FeedForm({
                 ))}
               </select>
             </label>
-          )}
+          }
           {automatic ? (
             <>
               {template === 'pawchive' && (
@@ -186,15 +191,12 @@ export default function FeedForm({
                   aria-label="Feed URL"
                   aria-describedby="feed-url-help"
                   required
-                  readOnly={!!feed}
                   placeholder="https://example.com/feed.xml"
                   value={form.url}
                   onChange={(e) => update('url', e.target.value)}
                 />
                 <small id="feed-url-help">
-                  {feed
-                    ? 'The URL identifies this connection. Create a new feed to use a different URL.'
-                    : 'Paste the full URL: RSS, Atom, Xcancel, or any RSSHub route.'}
+                  {'Paste the full URL: RSS, Atom, Xcancel, or any RSSHub route.'}
                 </small>
               </label>
               <label>
@@ -213,56 +215,26 @@ export default function FeedForm({
               </label>
             </>
           )}
-          <label>
-            Check every
-            <select
-              value={form.poll_minutes}
-              onChange={(e) => update('poll_minutes', Number(e.target.value))}
-            >
-              {[5, 10, 15, 30, 60, 120, 360, 720, 1440].map((m) => (
-                <option key={m} value={m}>
-                  {m < 60 ? `${m} minutes` : `${m / 60} hour(s)`}
-                </option>
-              ))}
-            </select>
-          </label>
         </div>
-        <div className="form-options">
-          <Toggle
-            checked={form.notify}
-            onChange={(v) => update('notify', v)}
-            label="Notify on Discord"
-            description="Send new posts to your configured webhook."
-          />
-          <Toggle
-            checked={form.auto_download}
-            onChange={(v) => update('auto_download', v)}
-            label="Download files automatically"
-            description="Save images and videos from upcoming posts."
-          />
-          <Toggle
-            checked={form.enabled}
-            onChange={(v) => update('enabled', v)}
-            label="Follow this feed"
-            description="Keep scheduled checks enabled."
-          />
+
+        <div className="notice">
+          <Archive size={17} />
+          <span>
+            The first sync imports history silently. New posts follow this server’s delivery
+            settings.
+          </span>
         </div>
-        {!feed && (
-          <div className="notice">
-            <Archive size={17} />
-            <span>
-              The first sync imports history without sending notifications or downloading files.
-              Automation starts with new posts.
-            </span>
-          </div>
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
         )}
         <div className="modal-actions">
-          <button type="button" className="button secondary" onClick={onClose}>
+          <button className="button secondary" type="button" onClick={onClose}>
             Cancel
           </button>
           <button className="button primary" disabled={busy || (automatic && !generatedUrl)}>
-            {busy ? <LoaderCircle className="spin" size={16} /> : <Plus size={16} />}{' '}
-            {feed ? 'Save changes' : 'Add feed'}
+            {busy ? <LoaderCircle size={16} className="spin" /> : <Plus size={16} />}Add feed
           </button>
         </div>
       </form>

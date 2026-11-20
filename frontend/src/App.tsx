@@ -1,66 +1,75 @@
-import Login from './features/Login';
-import EntryCard from './features/EntryCard';
-import FeedForm from './features/FeedForm';
-import SettingsPanel from './features/SettingsPanel';
-import EntryDetail from './features/EntryDetail';
 import { useEffect, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import {
-  Archive,
-  ArrowDownToLine,
-  Bookmark,
-  CheckCheck,
-  ChevronLeft,
-  ChevronRight,
-  Clock3,
-  Grid2X2,
-  ImageOff,
-  LayoutList,
-  LoaderCircle,
+  Activity,
+  ArrowUpRight,
+  CheckCircle2,
+  Database,
+  HardDrive,
+  LayoutDashboard,
   LogOut,
   Menu,
-  Plus,
-  Radio,
-  RefreshCw,
-  Rss,
-  Search,
+  Server,
   Settings2,
-  SlidersHorizontal,
-  Sparkles,
-  Trash2,
-  Volume2,
+  ShieldCheck,
+  Users,
   X,
-  Activity,
-  Pause,
-  Play,
-  Pencil,
-  AlertCircle,
 } from 'lucide-react';
-import { api, bytes, date, sources } from './api';
-import type { Feed, Entry, Stats, Settings, Job, Download } from './api';
-import { Logo, Source, Modal, Empty } from './components';
-type View = 'library' | 'unread' | 'favorites' | 'feeds' | 'downloads' | 'activity' | 'settings';
-const titles: Record<View, string> = {
-  library: 'Your library',
-  unread: 'New posts',
-  favorites: 'Favorites',
-  feeds: 'Your feeds',
-  downloads: 'Downloads',
-  activity: 'Activity',
-  settings: 'Settings',
-};
-const subtitles: Record<View, string> = {
-  library: 'Follow artists. Keep your discoveries.',
-  unread: 'The latest posts, ready to explore.',
-  favorites: 'A place for the artwork you want to keep.',
-  feeds: 'Stay connected to your favorite corners of the internet.',
-  downloads: 'Your files, saved to your collection.',
-  activity: 'Follow every notification and download.',
-  settings: 'Your archive, your way.',
-};
+import { api, bytes, date } from './api';
+import { Logo, Toggle } from './components';
+import Login from './features/Login';
+interface Overview {
+  servers: number;
+  users: number;
+  subscriptions: number;
+  posts: number;
+  comments: number;
+  storage_bytes: number;
+  failed: number;
+  pending: number;
+  feed_errors: number;
+}
+interface ServerRow {
+  id: string;
+  name: string;
+  platform: string;
+  enabled: boolean;
+  channel_name: string;
+  artists: number;
+  webhooks: number;
+  created_at: string;
+}
+interface QueueRow {
+  id: string;
+  kind: string;
+  server: string;
+  status: string;
+  attempts: number;
+  last_error: string | null;
+  created_at: string;
+}
+interface Services {
+  database: string;
+  discord: string;
+  rsshub: string;
+  last_poll: string | null;
+  max_download_mb: number;
+}
+interface Settings {
+  downloads_enabled: boolean;
+  notifications_enabled: boolean;
+}
+const sections = [
+  { id: 'overview', label: 'Overview', icon: LayoutDashboard },
+  { id: 'servers', label: 'Servers', icon: Users },
+  { id: 'queues', label: 'Queues', icon: Activity },
+  { id: 'services', label: 'Services', icon: Server },
+  { id: 'settings', label: 'Settings', icon: Settings2 },
+] as const;
+type Section = (typeof sections)[number]['id'];
 export default function App() {
-  const [session, setSession] = useState<boolean | null>(null);
   const client = useQueryClient();
+  const [session, setSession] = useState<boolean | null>(null);
   useEffect(() => {
     api('/session')
       .then(() => setSession(true))
@@ -76,829 +85,411 @@ export default function App() {
     return (
       <div className="boot">
         <Logo />
-        <LoaderCircle className="spin" />
+        <p role="status">Connecting to administration…</p>
       </div>
     );
-  return session ? (
-    <Workspace
+  if (!session) return <Login onLogin={() => setSession(true)} />;
+  return (
+    <Administration
       onLogout={async () => {
         await api('/logout', 'POST');
         client.clear();
         setSession(false);
       }}
     />
-  ) : (
-    <Login onLogin={() => setSession(true)} />
   );
 }
-function Workspace({ onLogout }: { onLogout: () => Promise<void> }) {
-  const [view, setView] = useState<View>('library');
-  const [source, setSource] = useState('');
-  const [search, setSearch] = useState('');
-  const [debounced, setDebounced] = useState('');
-  const [feedId, setFeedId] = useState('');
-  const [page, setPage] = useState(1);
-  const [layout, setLayout] = useState('grid');
+function Administration({ onLogout }: { onLogout: () => Promise<void> }) {
+  const [section, setSection] = useState<Section>('overview');
   const [mobile, setMobile] = useState(false);
-  const [feedModal, setFeedModal] = useState<Feed | 'new' | null>(null);
-  const [selected, setSelected] = useState<Entry | null>(null);
-  const [deleteFeed, setDeleteFeed] = useState<Feed | null>(null);
-  const [toast, setToast] = useState('');
+  const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
   const client = useQueryClient();
-  const stats = useQuery({
-    queryKey: ['stats'],
-    queryFn: () => api<Stats>('/stats'),
-    refetchInterval: 15000,
+  const overview = useQuery({
+    queryKey: ['admin', 'overview'],
+    queryFn: () => api<Overview>('/admin/overview'),
+    refetchInterval: 30000,
   });
-  const feeds = useQuery({
-    queryKey: ['feeds'],
-    queryFn: () => api<Feed[]>('/feeds'),
-    refetchInterval: 15000,
+  const servers = useQuery({
+    queryKey: ['admin', 'servers'],
+    queryFn: () => api<ServerRow[]>('/admin/servers'),
+    enabled: section === 'servers',
   });
-  const settings = useQuery({ queryKey: ['settings'], queryFn: () => api<Settings>('/settings') });
-  const library = ['library', 'unread', 'favorites'].includes(view);
-  useEffect(() => {
-    const t = setTimeout(() => setDebounced(search), 250);
-    return () => clearTimeout(t);
-  }, [search]);
-  useEffect(() => {
-    setPage(1);
-  }, [source, debounced, feedId, view]);
-  useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(''), 5000);
-    return () => clearTimeout(t);
-  }, [toast]);
-  const params = new URLSearchParams({
-    page: String(page),
-    ...(source ? { source } : {}),
-    ...(debounced ? { q: debounced } : {}),
-    ...(feedId ? { feed_id: feedId } : {}),
-    ...(view === 'unread' ? { unread: 'true' } : {}),
-    ...(view === 'favorites' ? { favorite: 'true' } : {}),
+  const queues = useQuery({
+    queryKey: ['admin', 'queues'],
+    queryFn: () => api<QueueRow[]>('/admin/queues'),
+    enabled: section === 'queues',
+    refetchInterval: section === 'queues' ? 15000 : false,
   });
-  const entries = useQuery({
-    queryKey: ['entries', params.toString()],
-    queryFn: () => api<{ items: Entry[]; total: number; pages: number }>(`/entries?${params}`),
-    enabled: library,
-    refetchInterval: 15000,
+  const services = useQuery({
+    queryKey: ['admin', 'services'],
+    queryFn: () => api<Services>('/admin/services'),
+    enabled: section === 'services' || section === 'overview',
+    refetchInterval: 30000,
   });
-  const jobs = useQuery({
-    queryKey: ['jobs'],
-    queryFn: () => api<Job[]>('/jobs'),
-    enabled: view === 'activity',
-    refetchInterval: 10000,
+  const settings = useQuery({
+    queryKey: ['admin', 'settings'],
+    queryFn: () => api<Settings>('/admin/settings'),
+    enabled: section === 'settings',
   });
-  const downloads = useQuery({
-    queryKey: ['downloads'],
-    queryFn: () => api<Download[]>('/downloads'),
-    enabled: view === 'downloads',
-    refetchInterval: 15000,
-  });
-  const refresh = () => {
-    void client.invalidateQueries();
-  };
-  const act = async (path: string, method = 'POST', body?: unknown, message = 'Changes saved.') => {
+  async function act(path: string, body?: unknown) {
     setBusy(true);
+    setError('');
     try {
-      await api(path, method, body);
-      refresh();
-      setToast(message);
+      await api(path, body ? 'PUT' : 'POST', body);
+      await client.invalidateQueries({ queryKey: ['admin'] });
       return true;
     } catch (e) {
-      setToast((e as Error).message);
+      setError((e as Error).message);
       return false;
     } finally {
       setBusy(false);
     }
-  };
-  const navigate = (v: View) => {
-    setView(v);
-    setMobile(false);
-    setSource('');
-    setFeedId('');
-    setSearch('');
-  };
-  const counts = stats.data;
-  const nav = [
-    { id: 'library' as View, icon: Archive, label: 'Library', count: counts?.entries },
-    { id: 'unread' as View, icon: Sparkles, label: 'New posts', count: counts?.unread },
-    { id: 'favorites' as View, icon: Bookmark, label: 'Favorites', count: counts?.favorites },
-  ];
-  const failed = (feeds.data || []).filter((f) => f.last_error).length;
+  }
+  const query =
+    section === 'overview'
+      ? overview
+      : section === 'servers'
+        ? servers
+        : section === 'queues'
+          ? queues
+          : section === 'services'
+            ? services
+            : settings;
+  const description = {
+    overview: 'A clear view of your bot and the communities it serves.',
+    servers: 'Connected communities and their delivery configuration.',
+    queues: 'Monitor delivery and media processing across the installation.',
+    services: 'Configuration and operational signals from this installation.',
+    settings: 'Installation-wide controls. Server preferences stay in Community.',
+  }[section];
   return (
-    <div className="app-shell">
-      {mobile && (
-        <button
-          className="sidebar-scrim"
-          aria-label="Close menu"
-          onClick={() => setMobile(false)}
-        />
-      )}
-      <aside className={`sidebar ${mobile ? 'open' : ''}`}>
+    <div className="admin-shell">
+      <aside className={`admin-sidebar ${mobile ? 'is-open' : ''}`}>
         <Logo />
-        <div className="workspace-tag">
-          <span className="workspace-avatar">LA</span>
-          <span>
-            My archive<small>Personal workspace</small>
-          </span>
-          <span className="local-tag">LOCAL</span>
-        </div>
-        <span className="nav-label">COLLECTION</span>
-        <nav>
-          {nav.map((n) => (
-            <button
-              key={n.id}
-              className={view === n.id ? 'active' : ''}
-              onClick={() => navigate(n.id)}
-            >
-              <n.icon size={18} />
-              <span>{n.label}</span>
-              {n.count !== undefined && <span className="nav-count">{n.count}</span>}
-            </button>
-          ))}
-        </nav>
-        <span className="nav-label">MANAGE</span>
-        <nav>
-          {[
-            { id: 'feeds' as View, icon: Rss, label: 'Feeds' },
-            { id: 'downloads' as View, icon: ArrowDownToLine, label: 'Downloads' },
-            { id: 'activity' as View, icon: Activity, label: 'Activity' },
-          ].map((n) => (
-            <button
-              key={n.id}
-              className={view === n.id ? 'active' : ''}
-              onClick={() => navigate(n.id)}
-            >
-              <n.icon size={18} />
-              <span>{n.label}</span>
-              {n.id === 'feeds' && <span className="nav-count">{counts?.feeds || 0}</span>}
-              {n.id === 'activity' && !!counts?.failed_jobs && <span className="error-dot" />}
-            </button>
-          ))}
-        </nav>
-        <div className="sidebar-feeds">
-          <div className="nav-label">
-            YOUR CONNECTIONS
-            <button aria-label="Add feed" onClick={() => setFeedModal('new')}>
-              <Plus size={14} />
-            </button>
+        <div className="admin-identity">
+          <ShieldCheck size={21} />
+          <div>
+            <strong>Bot administration</strong>
+            <small>Installation access</small>
           </div>
-          {(feeds.data || []).slice(0, 5).map((f) => (
+        </div>
+        <nav aria-label="Administration">
+          {sections.map((item) => (
             <button
-              className="mini-feed"
-              key={f.id}
+              className={section === item.id ? 'active' : ''}
+              key={item.id}
               onClick={() => {
-                navigate('library');
-                setFeedId(f.id);
+                setSection(item.id);
+                setMobile(false);
+                setError('');
               }}
             >
-              <span className={`feed-dot ${f.last_error ? 'failed' : f.enabled ? '' : 'paused'}`} />
-              <span>{f.name}</span>
+              <item.icon size={18} />
+              {item.label}
+              {item.id === 'queues' && !!overview.data?.failed && (
+                <span className="admin-nav-count">{overview.data.failed}</span>
+              )}
             </button>
           ))}
-          {!feeds.data?.length && (
-            <p>
-              Your favorite artists
-              <br />
-              will appear here.
-            </p>
-          )}
-        </div>
-        <div className="sidebar-bottom">
-          <div className="monitor-status">
-            <span className={`feed-dot ${stats.isError ? 'failed' : ''}`} />
-            <span>
-              {stats.isError ? 'Server unavailable' : 'Observatory online'}
-              <small>{counts?.active_feeds || 0} active feeds · automatic checks</small>
-            </span>
-            <Radio size={15} />
-          </div>
-          <button
-            className={view === 'settings' ? 'active' : ''}
-            onClick={() => navigate('settings')}
-          >
-            <Settings2 size={18} />
-            Settings
-          </button>
-          <button onClick={() => void onLogout().catch((e) => setToast(e.message))}>
+        </nav>
+        <div className="admin-sidebar-footer">
+          <a href="/community">
+            <Users size={17} />
+            Open Community
+            <ArrowUpRight size={14} />
+          </a>
+          <button onClick={() => void onLogout().catch((e) => setError(e.message))}>
             <LogOut size={17} />
             Sign out
           </button>
-          <div className="sidebar-signature">
-            <span>LEWDARCHIVE</span>
-            <span>v0.1 / NIGHT</span>
-          </div>
+          <small>LEWDARCHIVE / ADMINISTRATION</small>
         </div>
       </aside>
-      <main>
-        <header className="topbar">
-          <div className="breadcrumb">
-            <button
-              className="icon-button mobile-menu"
-              aria-label="Open menu"
-              onClick={() => setMobile(true)}
-            >
-              <Menu size={20} />
-            </button>
-            <span>My archive</span>
-            <ChevronRight size={13} />
-            <strong>{titles[view]}</strong>
-          </div>
-          <div className="topbar-right">
-            <span className="system-pill">
-              <span className="feed-dot" />
-              PERSONAL ARCHIVE
-            </span>
-            <span className="avatar">LA</span>
-          </div>
+      {mobile && (
+        <button
+          className="admin-backdrop"
+          aria-label="Close navigation"
+          onClick={() => setMobile(false)}
+        />
+      )}
+      <main className="admin-main">
+        <header className="admin-topbar">
+          <button
+            className="icon-button admin-menu"
+            aria-label="Open navigation"
+            onClick={() => setMobile(!mobile)}
+          >
+            {mobile ? <X size={18} /> : <Menu size={18} />}
+          </button>
+          <span>
+            Administration <span>/</span> {sections.find((s) => s.id === section)?.label}
+          </span>
+          <span className="admin-access">
+            <ShieldCheck size={14} />
+            Administrator
+          </span>
         </header>
-        <div className="main-content">
-          <div className="page-heading">
-            <div>
-              <span className="eyebrow">
-                {view === 'library' ? 'THE COLLECTION / YOUR ARCHIVE' : 'LEWDARCHIVE / YOUR SPACE'}
-              </span>
-              <h1>
-                {titles[view]}
-                <span className="heading-dot">.</span>
-              </h1>
-              <p>{subtitles[view]}</p>
-            </div>
-            <div className="heading-actions">
-              <button
-                className="button secondary"
-                disabled={busy}
-                onClick={() =>
-                  void act(
-                    '/sync',
-                    'POST',
-                    undefined,
-                    'Sync scheduled. Posts will update automatically.',
-                  )
-                }
-              >
-                <RefreshCw size={15} className={busy ? 'spin' : ''} />
-                <span>Sync</span>
-              </button>
-              <button className="button primary" onClick={() => setFeedModal('new')}>
-                <Plus size={17} />
-                New feed
-              </button>
-            </div>
+        <div className="admin-content">
+          <div className="admin-heading">
+            <span className="eyebrow">LEWDARCHIVE / OPERATIONS</span>
+            <h1>
+              {section === 'overview'
+                ? 'Installation overview'
+                : sections.find((s) => s.id === section)?.label}
+            </h1>
+            <p>{description}</p>
           </div>
-          {(view === 'library' || view === 'feeds') && (
-            <div className="overview">
-              <div>
-                <span className="stat-icon">
-                  <Rss size={17} />
-                </span>
-                <span>
-                  <small>Followed feeds</small>
-                  <strong>
-                    {counts?.feeds ?? '—'}
-                    <em>{counts?.active_feeds || 0} active</em>
-                  </strong>
-                </span>
-              </div>
-              <div>
-                <span className="stat-icon">
-                  <ImageOff size={17} />
-                </span>
-                <span>
-                  <small>Archived posts</small>
-                  <strong>
-                    {counts?.entries ?? '—'}
-                    <em>in your collection</em>
-                  </strong>
-                </span>
-              </div>
-              <div>
-                <span className="stat-icon pink">
-                  <Sparkles size={17} />
-                </span>
-                <span>
-                  <small>New posts</small>
-                  <strong>
-                    {counts?.unread ?? '—'}
-                    <em>to discover</em>
-                  </strong>
-                </span>
-              </div>
-              <div>
-                <span className="stat-icon">
-                  <ArrowDownToLine size={17} />
-                </span>
-                <span>
-                  <small>Saved files</small>
-                  <strong>
-                    {counts?.downloads ?? '—'}
-                    <em>{bytes(counts?.storage_bytes || 0)}</em>
-                  </strong>
-                </span>
-              </div>
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
+          {query.isError && (
+            <div className="notice" role="alert">
+              {query.error.message}
+              <button className="button secondary" onClick={() => void query.refetch()}>
+                Try again
+              </button>
             </div>
           )}
-          {!!failed && view === 'feeds' && (
-            <div className="notice">
-              <AlertCircle size={17} />
-              {failed} feed(s) need attention. See the error messages below.
-            </div>
-          )}
-          {library && (
+          {query.isPending && <p role="status">Loading {section}…</p>}
+          {section === 'overview' && overview.data && (
             <>
-              <section className="collection-toolbar">
-                <div className="source-tabs">
-                  <button className={!source ? 'selected' : ''} onClick={() => setSource('')}>
-                    All sources
-                  </button>
-                  {sources
-                    .filter((s) => s.id !== 'rss')
-                    .map((s) => (
-                      <button
-                        key={s.id}
-                        className={source === s.id ? 'selected' : ''}
-                        onClick={() => setSource(s.id)}
-                      >
-                        <span>{s.mark}</span>
-                        {s.label}
-                      </button>
-                    ))}
-                </div>
-                <div className="filter-line">
-                  <label className="search-input">
-                    <Search size={17} />
-                    <input
-                      aria-label="Search posts or artists"
-                      placeholder="Search posts or artists..."
-                      value={search}
-                      onChange={(e) => setSearch(e.target.value)}
-                    />
-                    {search && (
-                      <button aria-label="Clear search" onClick={() => setSearch('')}>
-                        <X size={14} />
-                      </button>
-                    )}
-                  </label>
-                  <div className="filter-right">
-                    <label className="feed-filter">
-                      <SlidersHorizontal size={15} />
-                      <select
-                        aria-label="Filter by feed"
-                        value={feedId}
-                        onChange={(e) => setFeedId(e.target.value)}
-                      >
-                        <option value="">All feeds</option>
-                        {feeds.data?.map((f) => (
-                          <option value={f.id} key={f.id}>
-                            {f.name}
-                          </option>
-                        ))}
-                      </select>
-                    </label>
-                    <div className="view-toggle">
-                      <button
-                        className={layout === 'grid' ? 'selected' : ''}
-                        aria-label="Grid view"
-                        aria-pressed={layout === 'grid'}
-                        onClick={() => setLayout('grid')}
-                      >
-                        <Grid2X2 size={16} />
-                      </button>
-                      <button
-                        className={layout === 'list' ? 'selected' : ''}
-                        aria-label="List view"
-                        aria-pressed={layout === 'list'}
-                        onClick={() => setLayout('list')}
-                      >
-                        <LayoutList size={17} />
-                      </button>
-                    </div>
-                  </div>
-                </div>
-              </section>
-              <div className="result-line">
-                <span>
-                  {entries.data?.total || 0} posts <span className="muted">/ newest first</span>
-                </span>
-                {!!counts?.unread && (
-                  <button
-                    disabled={busy}
-                    onClick={() =>
-                      void act('/entries/read-all', 'POST', undefined, 'All posts marked as read.')
-                    }
-                  >
-                    <CheckCheck size={15} />
-                    Mark all as read
-                  </button>
-                )}
-              </div>
-              {entries.isError ? (
-                <ErrorPanel error={entries.error} retry={() => void entries.refetch()} />
-              ) : entries.isPending ? (
-                <Loading />
-              ) : entries.data?.items.length ? (
-                <>
-                  <div className={`entry-grid ${layout === 'list' ? 'list-layout' : ''}`}>
-                    {entries.data.items.map((e) => (
-                      <EntryCard
-                        key={e.id}
-                        entry={e}
-                        onOpen={() => {
-                          setSelected(e);
-                          if (!e.is_read)
-                            void act(
-                              `/entries/${e.id}`,
-                              'PATCH',
-                              { is_read: true },
-                              'Post marked as read.',
-                            );
-                        }}
-                        onFavorite={() =>
-                          void act(
-                            `/entries/${e.id}`,
-                            'PATCH',
-                            { favorite: !e.favorite },
-                            e.favorite ? 'Removed from favorites.' : 'Saved to favorites.',
-                          )
-                        }
-                      />
-                    ))}
-                  </div>
-                  <div className="pagination">
-                    <button
-                      className="button secondary"
-                      disabled={page === 1}
-                      onClick={() => setPage((p) => p - 1)}
-                    >
-                      <ChevronLeft size={16} />
-                      Previous
-                    </button>
-                    <span>
-                      Page {page} of {entries.data.pages}
-                    </span>
-                    <button
-                      className="button secondary"
-                      disabled={page >= entries.data.pages}
-                      onClick={() => setPage((p) => p + 1)}
-                    >
-                      Next
-                      <ChevronRight size={16} />
-                    </button>
-                  </div>
-                </>
-              ) : (
-                <Empty
-                  kind={
-                    search || source || feedId || view === 'unread'
-                      ? 'search'
-                      : view === 'favorites'
-                        ? 'favorites'
-                        : 'library'
-                  }
-                  onAdd={!counts?.feeds ? () => setFeedModal('new') : undefined}
-                />
-              )}
-            </>
-          )}
-          {view === 'feeds' &&
-            (feeds.isError ? (
-              <ErrorPanel error={feeds.error} retry={() => void feeds.refetch()} />
-            ) : feeds.isPending ? (
-              <Loading />
-            ) : feeds.data?.length ? (
-              <div className="feed-list">
-                {feeds.data.map((f) => (
-                  <article className="feed-card" key={f.id}>
-                    <div className={`feed-monogram source-${f.source}`}>
-                      {f.name.slice(0, 2).toUpperCase()}
-                    </div>
-                    <div className="feed-info">
-                      <div>
-                        <h3>{f.name}</h3>
-                        <Source id={f.source} />
-                        <span
-                          className={`badge ${f.last_error ? 'danger' : f.enabled ? 'good' : ''}`}
-                        >
-                          {f.last_error ? 'Needs attention' : f.enabled ? 'Active' : 'Paused'}
-                        </span>
-                      </div>
-                      <p className="feed-url">{f.url}</p>
-                      <div className="feed-meta">
-                        <span>
-                          <Clock3 size={13} />
-                          Every {f.poll_minutes} min
-                        </span>
-                        <span>
-                          <Volume2 size={13} />
-                          {f.notify ? 'Discord enabled' : 'Notifications off'}
-                        </span>
-                        <span>
-                          <ArrowDownToLine size={13} />
-                          {f.auto_download ? 'Automatic downloads' : 'Manual downloads'}
-                        </span>
-                      </div>
-                      {f.last_error && <p className="error">{f.last_error}</p>}
-                      <small>Last checked: {date(f.last_checked_at)}</small>
-                    </div>
-                    <div className="feed-actions">
-                      <button
-                        className="icon-button"
-                        aria-label={`Sync ${f.name}`}
-                        disabled={!f.enabled || busy}
-                        onClick={() => void act(`/feeds/${f.id}/sync`)}
-                      >
-                        <RefreshCw size={16} />
-                      </button>
-                      <button
-                        className="icon-button"
-                        aria-label={f.enabled ? `Pause ${f.name}` : `Enable ${f.name}`}
-                        disabled={busy}
-                        onClick={() =>
-                          void act(`/feeds/${f.id}`, 'PUT', { ...f, enabled: !f.enabled })
-                        }
-                      >
-                        {f.enabled ? <Pause size={16} /> : <Play size={16} />}
-                      </button>
-                      <button
-                        className="icon-button"
-                        aria-label={`Edit ${f.name}`}
-                        onClick={() => setFeedModal(f)}
-                      >
-                        <Pencil size={16} />
-                      </button>
-                      <button
-                        className="icon-button danger-text"
-                        aria-label={`Delete ${f.name}`}
-                        onClick={() => setDeleteFeed(f)}
-                      >
-                        <Trash2 size={16} />
-                      </button>
-                    </div>
+              <div className="admin-metrics">
+                {[
+                  { label: 'Connected servers', value: overview.data.servers, icon: Users },
+                  { label: 'Registered members', value: overview.data.users, icon: ShieldCheck },
+                  { label: 'Pending jobs', value: overview.data.pending, icon: Activity },
+                  {
+                    label: 'Media storage',
+                    value: bytes(overview.data.storage_bytes),
+                    icon: HardDrive,
+                  },
+                ].map((m) => (
+                  <article key={m.label}>
+                    <m.icon size={21} />
+                    <span>{m.label}</span>
+                    <strong>{m.value}</strong>
                   </article>
                 ))}
               </div>
-            ) : (
-              <Empty kind="feeds" onAdd={() => setFeedModal('new')} />
-            ))}
-          {view === 'settings' &&
-            (settings.isError ? (
-              <ErrorPanel error={settings.error} retry={() => void settings.refetch()} />
-            ) : settings.data ? (
-              <SettingsPanel
-                initial={settings.data}
-                onSave={async (body) => act('/settings', 'PUT', body, 'Settings saved.')}
-              />
-            ) : (
-              <Loading />
-            ))}
-          {view === 'activity' && (
-            <>
-              <div className="section-note">
-                <span>
-                  <Activity size={16} />
-                  Processing queue
-                </span>
-                <small>Latest 100 jobs · updated automatically</small>
+              <div className="admin-panels">
+                <section className="admin-panel">
+                  <div className="admin-panel-title">
+                    <Activity size={20} />
+                    <h2>Attention & delivery</h2>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Failed jobs</dt>
+                      <dd className={overview.data.failed ? 'danger-text' : ''}>
+                        {overview.data.failed}
+                      </dd>
+                    </div>
+                    <div>
+                      <dt>Connections with sync errors</dt>
+                      <dd>{overview.data.feed_errors}</dd>
+                    </div>
+                    <div>
+                      <dt>Last feed check</dt>
+                      <dd>{date(services.data?.last_poll ?? null)}</dd>
+                    </div>
+                  </dl>
+                  <button className="button secondary" onClick={() => setSection('queues')}>
+                    Inspect queues
+                    <ArrowUpRight size={15} />
+                  </button>
+                </section>
+                <section className="admin-panel">
+                  <div className="admin-panel-title">
+                    <Database size={20} />
+                    <h2>Community footprint</h2>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>Artist subscriptions</dt>
+                      <dd>{overview.data.subscriptions}</dd>
+                    </div>
+                    <div>
+                      <dt>Stored posts</dt>
+                      <dd>{overview.data.posts}</dd>
+                    </div>
+                    <div>
+                      <dt>Comments</dt>
+                      <dd>{overview.data.comments}</dd>
+                    </div>
+                  </dl>
+                  <p>
+                    Artists, artwork and personal collections are managed in each server’s
+                    Community.
+                  </p>
+                  <a className="button secondary" href="/community">
+                    Open Community
+                    <ArrowUpRight size={15} />
+                  </a>
+                </section>
               </div>
-              {jobs.isError ? (
-                <ErrorPanel error={jobs.error} retry={() => void jobs.refetch()} />
-              ) : jobs.isPending ? (
-                <Loading />
-              ) : jobs.data?.length ? (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>Post</th>
-                        <th>Action</th>
-                        <th>Status</th>
-                        <th>Attempts</th>
-                        <th>Date</th>
-                        <th />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {jobs.data.map((j) => (
-                        <tr key={j.id}>
-                          <td>
-                            <strong>{j.title}</strong>
-                            <small>{j.feed_name}</small>
-                            {j.last_error && <small className="error">{j.last_error}</small>}
-                          </td>
-                          <td>
-                            <span className="inline-icon">
-                              {j.kind === 'discord' ? (
-                                <Volume2 size={15} />
-                              ) : (
-                                <ArrowDownToLine size={15} />
-                              )}{' '}
-                              {j.kind === 'discord' ? 'Discord' : 'Download'}
-                            </span>
-                          </td>
-                          <td>
-                            <span
-                              className={`badge ${j.status === 'done' ? 'good' : j.status === 'failed' ? 'danger' : ''}`}
-                            >
-                              {
-                                (
-                                  {
-                                    done: 'Completed',
-                                    failed: 'Failed',
-                                    pending: 'Queued',
-                                    processing: 'Processing',
-                                  } as Record<string, string>
-                                )[j.status]
-                              }
-                            </span>
-                          </td>
-                          <td>{j.attempts}/8</td>
-                          <td>{date(j.created_at)}</td>
-                          <td>
-                            {j.status === 'failed' && (
-                              <button
-                                className="icon-button"
-                                aria-label="Try again"
-                                disabled={busy}
-                                onClick={() => void act(`/jobs/${j.id}/retry`)}
-                              >
-                                <RefreshCw size={16} />
-                              </button>
-                            )}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <Empty kind="activity" />
-              )}
             </>
           )}
-          {view === 'downloads' && (
-            <>
-              <div className="section-note">
-                <span>
-                  <ArrowDownToLine size={16} />
-                  {counts?.downloads || 0} files · {bytes(counts?.storage_bytes || 0)}
-                </span>
-                <small>Latest 200 saved files</small>
-              </div>
-              {downloads.isError ? (
-                <ErrorPanel error={downloads.error} retry={() => void downloads.refetch()} />
-              ) : downloads.isPending ? (
-                <Loading />
-              ) : downloads.data?.length ? (
-                <div className="table-wrap">
-                  <table>
-                    <thead>
-                      <tr>
-                        <th>File</th>
-                        <th>Format</th>
-                        <th>Size</th>
-                        <th>Saved on</th>
-                        <th />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {downloads.data.map((d) => (
-                        <tr key={d.id}>
-                          <td>
-                            <strong>{d.title}</strong>
-                            <small>{d.author}</small>
-                          </td>
-                          <td>
-                            <span className="badge">{d.content_type.split('/')[1]}</span>
-                          </td>
-                          <td>{bytes(d.size_bytes)}</td>
-                          <td>{date(d.created_at)}</td>
-                          <td>
-                            <a
-                              className="button secondary"
-                              href={`/api/downloads/${d.id}/file`}
-                              download
-                            >
-                              <ArrowDownToLine size={15} />
-                              Download
-                            </a>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              ) : (
-                <Empty kind="downloads" />
+          {section === 'servers' && servers.data && (
+            <div className="admin-server-list">
+              {servers.data.length === 0 && (
+                <Empty
+                  title="No servers connected"
+                  text="Connect the bot to a server through Community to get started."
+                />
               )}
-            </>
+              {servers.data.map((s) => (
+                <article className="admin-panel admin-server" key={s.id}>
+                  <div className="admin-server-initial">{s.name.slice(0, 1)}</div>
+                  <div>
+                    <h2>{s.name}</h2>
+                    <p>
+                      {s.platform} · {s.artists} artists · {s.webhooks} webhooks
+                    </p>
+                    <small>
+                      {s.channel_name ? '#' + s.channel_name : 'No bot channel'} · Connected{' '}
+                      {date(s.created_at)}
+                    </small>
+                  </div>
+                  <span className={`badge ${s.enabled ? 'good' : ''}`}>
+                    {s.enabled ? 'Delivery enabled' : 'Delivery paused'}
+                  </span>
+                </article>
+              ))}
+            </div>
           )}
-          <footer className="content-footer">
-            <span>Your own little universe of artists.</span>
-            <span>
-              COLLECT WITH CARE. <span className="pink-text">KEEP ART.</span>
-            </span>
+          {section === 'queues' && queues.data && (
+            <div className="admin-queue-list">
+              {queues.data.length === 0 && (
+                <Empty
+                  title="Nothing in the queue"
+                  text="Bot deliveries, webhooks and media tasks will appear here."
+                />
+              )}
+              {queues.data.map((j) => (
+                <article className="admin-panel admin-job" key={j.kind + j.id}>
+                  <div>
+                    <span className="eyebrow">{j.kind}</span>
+                    <h2>{j.server}</h2>
+                    <p>
+                      {date(j.created_at)} · {j.attempts} attempts
+                    </p>
+                    {j.last_error && <p className="error">{j.last_error}</p>}
+                  </div>
+                  <span
+                    className={`badge ${j.status === 'failed' ? 'danger' : j.status === 'done' ? 'good' : ''}`}
+                  >
+                    {j.status}
+                  </span>
+                  {j.status === 'failed' && (
+                    <button
+                      className="button secondary"
+                      disabled={busy}
+                      onClick={() => void act(`/admin/queues/${j.kind}/${j.id}/retry`)}
+                    >
+                      Retry
+                    </button>
+                  )}
+                </article>
+              ))}
+            </div>
+          )}
+          {section === 'services' && services.data && (
+            <div className="admin-panels">
+              {[
+                {
+                  name: 'PostgreSQL',
+                  value: services.data.database,
+                  detail: 'Application database connectivity.',
+                },
+                {
+                  name: 'Discord',
+                  value: services.data.discord,
+                  detail: 'HTTP interactions and bot delivery configuration.',
+                },
+                {
+                  name: 'RSSHub',
+                  value: services.data.rsshub,
+                  detail:
+                    'Feed builder configured. Individual fetch failures appear in the overview.',
+                },
+                {
+                  name: 'Feed scheduler',
+                  value: date(services.data.last_poll),
+                  detail: 'Most recent completed feed check.',
+                },
+              ].map((s) => (
+                <section className="admin-panel" key={s.name}>
+                  <h2>{s.name}</h2>
+                  <strong className="admin-service-value">{s.value}</strong>
+                  <p>{s.detail}</p>
+                </section>
+              ))}
+            </div>
+          )}
+          {section === 'settings' && settings.data && (
+            <GlobalSettings
+              settings={settings.data}
+              busy={busy}
+              save={(v) => act('/admin/settings', v)}
+            />
+          )}
+          <footer className="admin-footer">
+            Installation administration · Community content stays in Community.
           </footer>
         </div>
       </main>
-      {toast && (
-        <div className="toast" role="status">
-          <span>{toast}</span>
-          <button aria-label="Dismiss message" onClick={() => setToast('')}>
-            <X size={16} />
-          </button>
-        </div>
-      )}
-      {feedModal && (
-        <FeedForm
-          feed={feedModal === 'new' ? undefined : feedModal}
-          onClose={() => setFeedModal(null)}
-          onSubmit={async (data) => {
-            const success = await act(
-              feedModal === 'new' ? '/feeds' : `/feeds/${feedModal.id}`,
-              feedModal === 'new' ? 'POST' : 'PUT',
-              data,
-              feedModal === 'new'
-                ? 'Feed added. Importing history without sending old notifications.'
-                : 'Feed updated.',
-            );
-            if (success) setFeedModal(null);
-            return success;
-          }}
-        />
-      )}
-      {selected && (
-        <EntryDetail
-          entry={selected}
-          onSendDiscord={async () => {
-            try {
-              await api(`/entries/${selected.id}/discord`, 'POST');
-              refresh();
-              return null;
-            } catch (error) {
-              return (error as Error).message;
-            }
-          }}
-          onClose={() => setSelected(null)}
-          onDownload={() =>
-            void act(`/entries/${selected.id}/download`, 'POST', undefined, 'Download queued.')
-          }
-          onFavorite={async () => {
-            if (await act(`/entries/${selected.id}`, 'PATCH', { favorite: !selected.favorite }))
-              setSelected({ ...selected, favorite: !selected.favorite });
-          }}
-        />
-      )}
-      {deleteFeed && (
-        <Modal
-          title="Remove this feed?"
-          subtitle={deleteFeed.name}
-          onClose={() => setDeleteFeed(null)}
-        >
-          <p className="modal-copy">
-            This will remove the feed, its posts, favorites, and job records. Files already saved on
-            disk will remain, but will no longer appear in the interface.
-          </p>
-          <div className="modal-actions">
-            <button className="button secondary" onClick={() => setDeleteFeed(null)}>
-              Cancel
-            </button>
-            <button
-              className="button destructive"
-              disabled={busy}
-              onClick={async () => {
-                if (await act(`/feeds/${deleteFeed.id}`, 'DELETE', undefined, 'Feed removed.'))
-                  setDeleteFeed(null);
-              }}
-            >
-              <Trash2 size={16} />
-              Remove feed
-            </button>
-          </div>
-        </Modal>
-      )}
     </div>
   );
 }
-function Loading() {
+function Empty({ title, text }: { title: string; text: string }) {
   return (
-    <div className="loading">
-      <LoaderCircle className="spin" size={24} />
-      <span>Opening your archive...</span>
+    <div className="admin-empty">
+      <CheckCircle2 size={32} />
+      <h2>{title}</h2>
+      <p>{text}</p>
     </div>
   );
 }
-function ErrorPanel({ error, retry }: { error: Error | null; retry: () => void }) {
+function GlobalSettings({
+  settings,
+  busy,
+  save,
+}: {
+  settings: Settings;
+  busy: boolean;
+  save: (v: Settings) => Promise<boolean>;
+}) {
+  const [value, setValue] = useState(settings);
+  const [saved, setSaved] = useState(false);
   return (
-    <div className="error-panel">
-      <AlertCircle size={24} />
-      <h3>Unable to load</h3>
-      <p>{error?.message}</p>
-      <button className="button secondary" onClick={retry}>
-        <RefreshCw size={15} />
-        Try again
+    <form
+      className="admin-panel admin-settings"
+      onSubmit={async (e) => {
+        e.preventDefault();
+        setSaved(await save(value));
+      }}
+    >
+      <h2>Global automation</h2>
+      <p>These switches apply to all servers. Paused jobs stay queued.</p>
+      <Toggle
+        checked={value.notifications_enabled}
+        onChange={(v) => setValue({ ...value, notifications_enabled: v })}
+        label="Allow notifications"
+        description="Master switch for bot and webhook deliveries."
+      />
+      <Toggle
+        checked={value.downloads_enabled}
+        onChange={(v) => setValue({ ...value, downloads_enabled: v })}
+        label="Allow media downloads"
+        description="Allow server administrators to download individual posts manually."
+      />
+      <button className="button primary" disabled={busy}>
+        Save settings
       </button>
-    </div>
+      {saved && <p role="status">Settings saved.</p>}
+    </form>
   );
 }

@@ -36,9 +36,12 @@ cargo test --workspace --locked
 npm run format:check --prefix frontend
 npm run build --prefix frontend
 node --test scripts/init-env.test.mjs
+python -m unittest discover -s tagger -v
 ```
 
 Format frontend code with `npm run format --prefix frontend`. Use English for UI text, logs, errors, comments, tests, and documentation. Keep secrets, runtime data, dependencies, and build output out of Git.
+
+The optional CPU tagger needs Python 3.12+ and `pip install -r tagger/requirements.txt`. Its ordinary tests use synthetic images and mock model downloads. See [WD validation](docs/wd-tagger.md) for the opt-in real-model smoke test and reproducible timing script.
 
 ## Integration and browser tests
 
@@ -58,13 +61,21 @@ Integration checks cover authentication, feed CRUD, silent initial imports, cond
 The manual Discord queue test additionally requires `psql` on `PATH` (or `PSQL_PATH`), a `DATABASE_URL` whose database name ends with `_test`, no existing feeds, and no saved webhook:
 
 ```bash
-node scripts/test-discord.mjs
+node scripts/test-migrations.mjs
 ```
 
-It holds the scheduler lock while checking configuration errors, paused notifications, concurrent requests, and replay of completed or failed jobs. Its fake webhook is never contacted. No real Discord webhook is needed for these tests.
+It holds the scheduler lock while checking configuration errors, paused notifications, concurrent requests, and replay of completed or failed jobs. Its fake webhook is never contacted. No real Discord webhook is needed for these tests. The migration test runs both configured and unconfigured upgrade scenarios in a temporary schema and rolls back. Feed transfer tests exercise a Miniflux-shaped OPML file, preview, limits, duplicates, and roundtrip export. The multi-webhook test pauses global delivery before creating fake destinations, verifies automatic fanout, then holds the scheduler lock for manual delivery checks.
 
 ## Structure and conventions
 
 Keep API validation in `backend/src/api.rs`, feed normalization in `parser.rs`, HTTP restrictions in `network.rs`, and background processing in `worker.rs`. UI features live under `frontend/src/features`; reusable RSSHub route logic lives in `feedTemplates.ts`.
 
 Database schema changes belong in new versioned migrations. Do not modify migrations already applied to an installation. Preserve public API contracts when changing frontend behavior, and update the reference documents when contracts change.
+
+Community changes additionally require the PostgreSQL authorization test:
+
+```sh
+COMMUNITY_TEST_DATABASE_URL="$DATABASE_URL" cargo test --locked server_and_user_isolation -- --ignored
+```
+
+Use a dedicated database whose name ends with `_test`. This test creates and removes its own schema and uses a mock platform transport. Community browser tests mock Discord authentication; they do not require bot credentials. See [Discord bot setup](docs/discord-bot.md) for real application configuration.

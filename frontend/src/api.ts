@@ -1,69 +1,3 @@
-export interface Feed {
-  id: string;
-  name: string;
-  url: string;
-  source: string;
-  enabled: boolean;
-  auto_download: boolean;
-  notify: boolean;
-  poll_minutes: number;
-  initialized: boolean;
-  last_checked_at: string | null;
-  next_check_at: string;
-  last_error: string | null;
-  created_at: string;
-}
-export interface Entry {
-  id: string;
-  feed_id: string;
-  title: string;
-  author: string;
-  url: string;
-  summary: string;
-  media: { url: string; kind: string }[];
-  published_at: string;
-  is_read: boolean;
-  favorite: boolean;
-  feed_name: string;
-  source: string;
-}
-export interface Stats {
-  feeds: number;
-  active_feeds: number;
-  entries: number;
-  unread: number;
-  favorites: number;
-  downloads: number;
-  storage_bytes: number;
-  failed_jobs: number;
-  pending_jobs: number;
-}
-export interface Settings {
-  webhook_configured: boolean;
-  downloads_enabled: boolean;
-  notifications_enabled: boolean;
-}
-export interface Job {
-  id: string;
-  entry_id: string;
-  kind: string;
-  status: string;
-  attempts: number;
-  last_error: string | null;
-  created_at: string;
-  title: string;
-  feed_name: string;
-}
-export interface Download {
-  id: string;
-  entry_id: string;
-  filename: string;
-  size_bytes: number;
-  content_type: string;
-  created_at: string;
-  title: string;
-  author: string;
-}
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -112,4 +46,15 @@ export function bytes(n: number) {
       : n < 1073741824
         ? `${(n / 1048576).toFixed(1)} MB`
         : `${(n / 1073741824).toFixed(2)} GB`;
+}
+
+export interface Webhook {
+  category_filter: string | null;
+  id: string;
+  name: string;
+  username: string;
+  avatar_url: string;
+  embed_color: number;
+  enabled: boolean;
+  created_at: string;
 }

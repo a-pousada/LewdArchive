@@ -78,3 +78,7 @@ Back up PostgreSQL with `pg_dump` and copy the `media_data` volume. For a consis
 Feed deletion cascades through posts, jobs, and download metadata, but leaves physical files in the media volume. Those files no longer appear in the interface. Cleanup and retention are operator-managed. Abrupt shutdowns can also leave incomplete or orphaned files.
 
 The UI shows the latest 100 jobs and 200 downloads. The post library is paginated. Feed polling runs every 10 seconds and processes one batch at a time; large downloads can delay the next cycle.
+
+## Optional AI classification
+
+`WD_TAGGER_URL` (default empty, disabled) is the operator-controlled local WD service URL reachable from the app. For the bundled CPU service set it to `http://tagger:5000` and start Compose with `--profile ai`. `WD_CPU_THREADS` defaults to 2; `WD_GENERAL_THRESHOLD` to 0.35; `WD_CHARACTER_THRESHOLD` to 0.85. The service downloads pinned weights on first start and persists them in `wd_models`. Both previews and optional automatic tagging analyze up to two images. Automatic tagging is a separate, default-off server setting. Ollama settings are no longer used. See [categories and AI tags](categories-and-ai.md) for setup, migration, limits and queue behavior, and [CPU measurements](wd-tagger.md) for the model choice.

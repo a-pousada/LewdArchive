@@ -1,6 +1,7 @@
+use crate::platforms::discord::webhook_payload as discord_payload;
 use crate::{
     AppState,
-    models::{Entry, Feed, Job, Media, Settings},
+    models::{Entry, Feed, Job, Media, Settings, Webhook},
     network, parser,
 };
 use anyhow::{Context, Result, bail};
@@ -34,7 +35,7 @@ async fn tick(s: &AppState) -> Result<()> {
     result
 }
 async fn cycle(s: &AppState) -> Result<()> {
-    let feeds: Vec<Feed> = sqlx::query_as("SELECT * FROM feeds WHERE enabled AND next_check_at<=now() ORDER BY next_check_at LIMIT 10").fetch_all(&s.pool).await?;
+    let feeds: Vec<Feed> = sqlx::query_as("SELECT * FROM feeds WHERE enabled AND next_check_at<=now() AND EXISTS(SELECT 1 FROM community_artists a WHERE a.feed_id=feeds.id) ORDER BY next_check_at LIMIT 10").fetch_all(&s.pool).await?;
     for feed in feeds {
         let result = poll(s, &feed).await;
         let error = result
@@ -45,14 +46,14 @@ async fn cycle(s: &AppState) -> Result<()> {
     }
     sqlx::query("UPDATE jobs SET status='pending',next_attempt_at=now() WHERE status='processing' AND locked_at<now()-interval '15 minutes'").execute(&s.pool).await?;
     let settings: Settings =
-        sqlx::query_as("SELECT webhook_url,downloads_enabled,notifications_enabled FROM settings")
+        sqlx::query_as("SELECT downloads_enabled,notifications_enabled FROM settings")
             .fetch_one(&s.pool)
             .await?;
     for _ in 0..10 {
-        let job: Option<Job> = sqlx::query_as("UPDATE jobs SET status='processing',locked_at=now(),attempts=attempts+1,updated_at=now() WHERE id=(SELECT id FROM jobs WHERE status='pending' AND next_attempt_at<=now() AND ((kind='download' AND $1) OR (kind='discord' AND $2)) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,entry_id,kind,status,attempts,last_error,created_at,updated_at")
-            .bind(settings.downloads_enabled).bind(settings.notifications_enabled && !settings.webhook_url.is_empty()).fetch_optional(&s.pool).await?;
+        let job: Option<Job> = sqlx::query_as("UPDATE jobs SET status='processing',locked_at=now(),attempts=attempts+1,updated_at=now() WHERE id=(SELECT id FROM jobs WHERE status='pending' AND next_attempt_at<=now() AND ((kind='download' AND $1 AND EXISTS(SELECT 1 FROM entries e JOIN community_artists a ON a.feed_id=e.feed_id WHERE e.id=jobs.entry_id)) OR (kind='discord' AND $2 AND EXISTS(SELECT 1 FROM webhooks w WHERE w.id=jobs.webhook_id AND w.enabled AND (w.community_id IS NOT NULL AND EXISTS(SELECT 1 FROM communities c JOIN community_artists a ON a.community_id=c.id JOIN entries e ON e.feed_id=a.feed_id WHERE c.id=w.community_id AND c.enabled AND a.enabled AND (NOT $3 OR NOT c.ai_tags_enabled OR NOT EXISTS(SELECT 1 FROM community_tag_jobs t WHERE t.community_id=c.id AND t.entry_id=jobs.entry_id AND t.status IN('pending','processing') AND t.created_at>now()-interval '5 minutes')) AND (w.category_filter IS NULL OR w.category_filter=a.category) AND e.id=jobs.entry_id))))) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,entry_id,kind,webhook_id,status,attempts,last_error,created_at,updated_at")
+            .bind(settings.downloads_enabled).bind(settings.notifications_enabled).bind(s.tagger.is_some()).fetch_optional(&s.pool).await?;
         let Some(job) = job else { break };
-        let result = tokio::time::timeout(Duration::from_secs(600), execute(s, &settings, &job))
+        let result = tokio::time::timeout(Duration::from_secs(600), execute(s, &job))
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("Job exceeded the 10-minute time limit")));
         match result {
@@ -112,19 +113,7 @@ async fn poll(s: &AppState, feed: &Feed) -> Result<()> {
             .bind(id).bind(feed.id).bind(entry.guid).bind(entry.title).bind(entry.author).bind(entry.url).bind(entry.summary)
             .bind(json!(entry.media)).bind(entry.published_at).execute(&mut *tx).await?.rows_affected()>0;
         if inserted && feed.initialized {
-            for (kind, enabled) in [
-                ("discord", feed.notify),
-                ("download", feed.auto_download && !entry.media.is_empty()),
-            ] {
-                if enabled {
-                    sqlx::query("INSERT INTO jobs(id,entry_id,kind) VALUES($1,$2,$3)")
-                        .bind(Uuid::new_v4())
-                        .bind(id)
-                        .bind(kind)
-                        .execute(&mut *tx)
-                        .await?;
-                }
-            }
+            crate::community::worker::enqueue(&mut tx, feed.id, id).await?;
         }
     }
     sqlx::query("UPDATE feeds SET initialized=true,etag=$2,last_modified=$3 WHERE id=$1")
@@ -136,11 +125,30 @@ async fn poll(s: &AppState, feed: &Feed) -> Result<()> {
     tx.commit().await?;
     Ok(())
 }
-async fn execute(s: &AppState, settings: &Settings, job: &Job) -> Result<()> {
-    let entry: Entry = sqlx::query_as("SELECT e.id,e.feed_id,e.title,e.author,e.url,e.summary,e.media,e.published_at,e.is_read,e.favorite,f.name AS feed_name,f.source FROM entries e JOIN feeds f ON f.id=e.feed_id WHERE e.id=$1")
+async fn execute(s: &AppState, job: &Job) -> Result<()> {
+    let mut entry: Entry = sqlx::query_as("SELECT e.id,e.feed_id,e.title,e.author,e.url,e.summary,e.media,e.published_at,f.name AS feed_name,f.source FROM entries e JOIN feeds f ON f.id=e.feed_id WHERE e.id=$1")
         .bind(job.entry_id).fetch_one(&s.pool).await?;
     if job.kind == "discord" {
-        send_discord(&settings.webhook_url, &entry).await
+        let webhook: Webhook = sqlx::query_as("SELECT * FROM webhooks WHERE id=$1")
+            .bind(job.webhook_id)
+            .fetch_one(&s.pool)
+            .await?;
+        if !webhook.enabled {
+            bail!("Webhook is paused");
+        }
+        let community: Option<Uuid> =
+            sqlx::query_scalar("SELECT community_id FROM webhooks WHERE id=$1")
+                .bind(webhook.id)
+                .fetch_one(&s.pool)
+                .await?;
+        if let Some(server) = community {
+            entry.feed_name=sqlx::query_scalar("SELECT a.name FROM community_artists a JOIN communities c ON c.id=a.community_id WHERE a.community_id=$1 AND a.feed_id=$2 AND a.enabled AND c.enabled").bind(server).bind(entry.feed_id).fetch_optional(&s.pool).await?.context("Server artist announcements are paused or removed")?;
+        }
+        let mut payload = discord_payload(&entry, &webhook)?;
+        if let Some(server) = community {
+            crate::community::tags::decorate(s, server, entry.id, &mut payload).await?;
+        }
+        send_discord(&webhook, &payload).await
     } else {
         download(s, &entry).await
     }
@@ -149,46 +157,17 @@ async fn execute(s: &AppState, settings: &Settings, job: &Job) -> Result<()> {
 struct RateLimited(i32);
 impl std::fmt::Display for RateLimited {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Discord rate limit reached; retrying in {}s", self.0)
+        write!(f, "Webhook rate limit reached; retrying in {}s", self.0)
     }
 }
 impl std::error::Error for RateLimited {}
-fn discord_payload(e: &Entry) -> Result<serde_json::Value> {
-    let media: Vec<Media> = serde_json::from_value(e.media.clone())?;
-    let mut embed = json!({"title":e.title.chars().take(256).collect::<String>(),"url":e.url,
-        "description":e.summary.chars().take(1800).collect::<String>(),"color":14978709,
-        "author":{"name":e.author.chars().take(256).collect::<String>()},"timestamp":e.published_at.to_rfc3339(),
-        "footer":{"text":format!("LewdArchive · {}",e.feed_name).chars().take(256).collect::<String>()}});
-    if let Some(image) = media.iter().find(|m| m.kind == "image") {
-        embed["image"] = json!({"url":image.url});
-    }
-    let mut embeds = vec![embed];
-    for image in media.iter().filter(|m| m.kind == "image").skip(1).take(3) {
-        embeds.push(json!({"url":e.url,"image":{"url":image.url}}));
-    }
-    let attachments = media
-        .iter()
-        .filter(|m| m.kind == "video")
-        .take(3)
-        .enumerate()
-        .map(|(i, m)| format!("[Video {}]({})", i + 1, m.url))
-        .collect::<Vec<_>>()
-        .join(" · ");
-    if !attachments.is_empty() {
-        embeds[0]["fields"] =
-            json!([{"name":"Videos","value":attachments.chars().take(1024).collect::<String>()}]);
-    }
-    Ok(json!({"username":"LewdArchive","allowed_mentions":{"parse":[]},"embeds":embeds}))
-}
-async fn send_discord(webhook: &str, e: &Entry) -> Result<()> {
-    let mut url = network::webhook(webhook)?;
+async fn send_discord(webhook: &Webhook, payload: &serde_json::Value) -> Result<()> {
+    let mut url = network::webhook(&webhook.url)?;
     url.query_pairs_mut().append_pair("wait", "true");
-    let response = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .build()?
+    let client = network::public_webhook_client(&url).await?;
+    let response = client
         .post(url)
-        .json(&discord_payload(e)?)
+        .json(payload)
         .send()
         .await
         .map_err(|e| e.without_url())?;
@@ -204,7 +183,7 @@ async fn send_discord(webhook: &str, e: &Entry) -> Result<()> {
         .into());
     }
     if !response.status().is_success() {
-        bail!("Discord returned HTTP {}", response.status().as_u16());
+        bail!("Webhook returned HTTP {}", response.status().as_u16());
     }
     Ok(())
 }
@@ -296,12 +275,29 @@ mod tests {
                     .collect::<Vec<_>>()
             ),
             published_at: chrono::Utc::now(),
-            is_read: false,
-            favorite: false,
             feed_name: "Art".into(),
             source: "pixiv".into(),
         };
-        let payload = discord_payload(&entry).unwrap();
+        let mut webhook = Webhook {
+            category_filter: None,
+            id: Uuid::new_v4(),
+            name: "Art channel".into(),
+            url: String::new(),
+            username: "Archive bot".into(),
+            avatar_url: "https://example.com/avatar.png".into(),
+            embed_color: 0x123456,
+            enabled: true,
+            created_at: chrono::Utc::now(),
+        };
+        let payload = discord_payload(&entry, &webhook).unwrap();
+        assert_eq!(payload["username"], "Archive bot");
+        assert_eq!(payload["avatar_url"], webhook.avatar_url);
+        assert_eq!(payload["embeds"][0]["color"], 0x123456);
+        webhook.username.clear();
+        webhook.avatar_url.clear();
+        let default_payload = discord_payload(&entry, &webhook).unwrap();
+        assert!(default_payload.get("username").is_none());
+        assert!(default_payload.get("avatar_url").is_none());
         assert_eq!(payload["embeds"].as_array().unwrap().len(), 4);
         assert_eq!(
             payload["embeds"][0]["title"]

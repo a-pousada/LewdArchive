@@ -1,6 +1,7 @@
 use crate::{models::Media, network::web_url};
 use chrono::{DateTime, Utc};
-use scraper::{Html, Selector};
+use ego_tree::NodeRef;
+use scraper::{Html, Node, Selector};
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
@@ -13,15 +14,232 @@ pub struct ParsedEntry {
     pub media: Vec<Media>,
     pub published_at: DateTime<Utc>,
 }
-pub fn plain(html: &str) -> String {
+
+fn looks_like_filename(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    if t.is_empty() || t.contains(' ') {
+        return false;
+    }
+    [
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".svg", ".mp4", ".webm", ".mov",
+        ".zip", ".rar", ".7z", ".psd", ".clip", ".pdf",
+    ]
+    .iter()
+    .any(|ext| t.ends_with(ext))
+}
+
+fn text_content(node: &NodeRef<'_, Node>) -> String {
+    let mut s = String::new();
+    for child in node.children() {
+        match child.value() {
+            Node::Text(t) => s.push_str(t),
+            Node::Element(_) => s.push_str(&text_content(&child)),
+            _ => {}
+        }
+    }
+    s
+}
+
+fn should_separate(out: &str, next: &str) -> bool {
+    out.ends_with(|c: char| {
+        c.is_alphanumeric()
+            || matches!(c, '!' | '?' | '.' | ',' | ';' | ':' | ')' | ']' | '}' | '~')
+    }) && next.starts_with(|c: char| c.is_alphanumeric() || matches!(c, '(' | '[' | '{'))
+}
+
+fn walk_node(node: &NodeRef<'_, Node>, out: &mut String, in_downloads: &mut bool) {
+    match node.value() {
+        Node::Element(elem) => {
+            let name = elem.name();
+            // Skip non-content tags completely
+            if matches!(
+                name,
+                "script"
+                    | "style"
+                    | "noscript"
+                    | "svg"
+                    | "canvas"
+                    | "head"
+                    | "template"
+                    | "img"
+                    | "video"
+                    | "audio"
+            ) {
+                return;
+            }
+
+            // Detect section headers
+            if matches!(name, "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "div" | "p") {
+                let inner = text_content(node).trim().to_lowercase();
+                if inner == "downloads / files"
+                    || inner == "downloads/files"
+                    || inner == "downloads"
+                    || inner == "files"
+                    || inner == "attachments"
+                {
+                    *in_downloads = true;
+                    return;
+                }
+                if inner == "content" || inner == "post content" {
+                    *in_downloads = false;
+                    return;
+                }
+            }
+
+            if *in_downloads {
+                return;
+            }
+
+            if name == "figcaption" {
+                let fig_text = text_content(node).trim().to_lowercase();
+                if looks_like_filename(&fig_text) {
+                    return;
+                }
+            }
+
+            if matches!(name, "br" | "wbr") {
+                out.push('\n');
+                return;
+            }
+
+            let is_p = matches!(
+                name,
+                "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "blockquote"
+            );
+            let is_block = is_p
+                || matches!(
+                    name,
+                    "div"
+                        | "ul"
+                        | "ol"
+                        | "li"
+                        | "pre"
+                        | "article"
+                        | "section"
+                        | "header"
+                        | "footer"
+                        | "table"
+                        | "tr"
+                        | "hr"
+                );
+
+            if is_p && !out.is_empty() {
+                while !out.ends_with("\n\n") {
+                    out.push('\n');
+                }
+            } else if is_block && !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+
+            for child in node.children() {
+                walk_node(&child, out, in_downloads);
+            }
+
+            if is_p && !out.is_empty() {
+                while !out.ends_with("\n\n") {
+                    out.push('\n');
+                }
+            } else if is_block && !out.is_empty() && !out.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+        Node::Text(text) if !*in_downloads => {
+            let t: &str = text;
+            if !t.is_empty() {
+                if !out.is_empty()
+                    && !out.ends_with('\n')
+                    && !out.ends_with(' ')
+                    && !t.starts_with(' ')
+                    && should_separate(out, t)
+                {
+                    out.push(' ');
+                }
+                out.push_str(t);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn format_plain_lines(raw: &str) -> String {
+    let mut lines = Vec::new();
+    for raw_line in raw.lines() {
+        let clean = raw_line
+            .replace('\u{a0}', " ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if !clean.is_empty() {
+            lines.push(clean);
+        } else if lines.last().is_some_and(|l| !l.is_empty()) {
+            lines.push(String::new());
+        }
+    }
+    while lines.last().is_some_and(|l| l.is_empty()) {
+        lines.pop();
+    }
+    lines.join("\n")
+}
+
+pub fn clean_plain(text: &str) -> String {
+    let trimmed = text.trim();
+    if let Some((before, after)) = trimmed.split_once(" Content ") {
+        let before_lower = before.to_lowercase();
+        if before_lower.starts_with("downloads / files")
+            || before_lower.starts_with("downloads/files")
+            || before_lower.starts_with("downloads")
+            || before_lower.starts_with("files")
+        {
+            return format_plain_lines(after);
+        }
+    } else if let Some((before, after)) = trimmed.split_once("\nContent\n") {
+        let before_lower = before.to_lowercase();
+        if before_lower.starts_with("downloads / files")
+            || before_lower.starts_with("downloads/files")
+            || before_lower.starts_with("downloads")
+            || before_lower.starts_with("files")
+        {
+            return format_plain_lines(after);
+        }
+    } else {
+        let lower = trimmed.to_lowercase();
+        if lower.starts_with("downloads / files")
+            || lower.starts_with("downloads/files")
+            || lower == "downloads"
+            || lower == "content"
+        {
+            return String::new();
+        }
+    }
+    format_plain_lines(trimmed)
+}
+
+pub fn clean_summary(html: &str) -> String {
+    let doc = Html::parse_fragment(html);
+    let mut out = String::new();
+    let mut in_downloads = false;
+    for child in doc.root_element().children() {
+        walk_node(&child, &mut out, &mut in_downloads);
+    }
+    let formatted = format_plain_lines(&out);
+    clean_plain(&formatted)
+}
+
+pub fn plain_title(html: &str) -> String {
     Html::parse_fragment(html)
         .root_element()
         .text()
         .collect::<Vec<_>>()
         .join(" ")
+        .replace('\u{a0}', " ")
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+#[allow(dead_code)]
+pub fn plain(html: &str) -> String {
+    clean_summary(html)
 }
 pub fn parse(
     bytes: &[u8],
@@ -114,7 +332,7 @@ pub fn parse(
         }
         let title = entry
             .title
-            .map(|t| plain(&t.content))
+            .map(|t| plain_title(&t.content))
             .filter(|t| !t.is_empty())
             .unwrap_or("Untitled".into());
         let guid = if entry.id.is_empty() {
@@ -149,7 +367,7 @@ pub fn parse(
                 })
                 .unwrap_or(fallback_author.into()),
             url: url.into(),
-            summary: plain(html).chars().take(10000).collect(),
+            summary: clean_summary(html).chars().take(10000).collect(),
             media,
             published_at: entry.published.or(entry.updated).unwrap_or_else(Utc::now),
         });
@@ -188,5 +406,37 @@ mod tests {
         let entries = parse(xml, "https://example.com/feed", "Fallback").unwrap();
         assert_eq!(entries[0].author, "Aoi");
         assert_eq!(entries[0].guid, "one");
+    }
+    #[test]
+    fn strips_rsshub_downloads_and_content_boilerplate() {
+        let html = r#"<h2>Downloads / Files</h2><ul><li style="list-style-type:none"><a href="https://file.example.com/1.gif" target="_blank"><figure><img src="https://img.example.com/1.gif" alt="CRASH.gif"><figcaption>CRASH.gif</figcaption></figure></a></li><li style="list-style-type:none"><a href="https://file.example.com/2.gif"><figure><img src="https://img.example.com/2.gif" alt="SHAME2.gif"><figcaption>SHAME2.gif</figcaption></figure></a></li></ul><h2>Content</h2><p>Break my shit again Tatsu-maki, SEE WHAT HAPPENS! 😤</p><p><em>Happy Mondays everyone!</em><em>Some food for you~</em></p><p></p>"#;
+        let summary = clean_summary(html);
+        assert_eq!(
+            summary,
+            "Break my shit again Tatsu-maki, SEE WHAT HAPPENS! 😤\n\nHappy Mondays everyone! Some food for you~"
+        );
+    }
+    #[test]
+    fn cleans_posts_with_only_downloads_and_no_content() {
+        let html = r#"<h2>Downloads / Files</h2><ul><li><figure><img src="1.png"><figcaption>1.png</figcaption></figure></li></ul>"#;
+        assert_eq!(clean_summary(html), "");
+    }
+    #[test]
+    fn clean_plain_recovers_already_flattened_boilerplate() {
+        let legacy = "Downloads / Files CRASH.gif SHAME2.gif tumblr_o84mijLFrM1s4s960o1_540.gif Content Break my shit again Tatsu-maki, SEE WHAT HAPPENS! 😤 Happy Mondays everyone! Some food for you~";
+        assert_eq!(
+            clean_plain(legacy),
+            "Break my shit again Tatsu-maki, SEE WHAT HAPPENS! 😤 Happy Mondays everyone! Some food for you~"
+        );
+        let only_files = "Downloads / Files 1.png 2.png 3.gif";
+        assert_eq!(clean_plain(only_files), "");
+    }
+    #[test]
+    fn formats_paragraphs_and_breaks_cleanly() {
+        let html = "<p>First paragraph.</p><p>Second paragraph<br>with a line break.</p>";
+        assert_eq!(
+            clean_summary(html),
+            "First paragraph.\n\nSecond paragraph\nwith a line break."
+        );
     }
 }

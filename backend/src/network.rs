@@ -114,25 +114,60 @@ pub async fn limited_body(mut response: Response, limit: usize) -> Result<Vec<u8
     }
     Ok(body)
 }
+/// Resolve and pin a public destination before a server administrator can send a webhook.
+pub async fn public_webhook_client(url: &Url) -> Result<Client> {
+    if url.scheme() != "https" {
+        bail!("Community webhooks require HTTPS");
+    }
+    let host = url
+        .host_str()
+        .context("Missing webhook host")?
+        .trim_matches(['[', ']']);
+    let addresses: Vec<SocketAddr> =
+        tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443)))
+            .await
+            .context("Unable to resolve webhook host")?
+            .collect();
+    if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
+        bail!("Webhook destination must use a public address");
+    }
+    Ok(Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .connect_timeout(Duration::from_secs(10))
+        .resolve_to_addrs(host, &addresses)
+        .user_agent("LewdArchive/0.1 (+community webhook)")
+        .build()?)
+}
 pub fn webhook(raw: &str) -> Result<Url> {
     let url = web_url(raw)?;
-    let parts: Vec<_> = url.path().split('/').filter(|s| !s.is_empty()).collect();
-    if url.scheme() != "https"
-        || url.host_str() != Some("discord.com")
-        || url.port().is_some()
-        || parts.len() != 4
-        || parts[0] != "api"
-        || parts[1] != "webhooks"
-        || !parts[2].bytes().all(|c| c.is_ascii_digit())
-        || parts[3].len() < 20
-    {
-        bail!("Use a webhook URL starting with https://discord.com/api/webhooks/");
+    if url.cannot_be_a_base() {
+        bail!("Use an HTTP(S) URL without credentials");
     }
     Ok(url)
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn community_webhooks_reject_private_and_insecure_destinations() {
+        assert!(
+            public_webhook_client(&Url::parse("http://example.com/webhook").unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            public_webhook_client(&Url::parse("https://127.0.0.1/webhook").unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            public_webhook_client(&Url::parse("https://[::1]/webhook").unwrap())
+                .await
+                .is_err()
+        );
+    }
     #[test]
     fn blocks_private_networks() {
         for raw in [
@@ -155,6 +190,10 @@ mod tests {
     fn rejects_unsafe_urls() {
         assert!(web_url("file:///etc/passwd").is_err());
         assert!(web_url("https://user:pass@example.com/feed").is_err());
-        assert!(webhook("https://discord.com.evil.test/api/webhooks/123/token").is_err());
+        assert!(webhook("file:///etc/passwd").is_err());
+        assert!(webhook("https://user:pass@example.com/webhook").is_err());
+        assert!(webhook("https://discord.com/api/webhooks/123/token").is_ok());
+        assert!(webhook("https://api.fluxer.app/api/webhooks/123/token").is_ok());
+        assert!(webhook("https://example.com/webhook").is_ok());
     }
 }

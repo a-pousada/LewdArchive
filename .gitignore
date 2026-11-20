@@ -17,6 +17,8 @@
 /test-results/
 /frontend/test-results/
 /frontend/playwright-report/
+__pycache__/
+*.pyc
 *.log
 
 # Editor and operating system files

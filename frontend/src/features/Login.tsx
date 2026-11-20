@@ -11,30 +11,30 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
       <div className="login-brand">
         <Logo />
         <div className="login-message">
-          <span className="eyebrow">YOUR PERSONAL COLLECTION / KEEP WHAT YOU LOVE</span>
+          <span className="eyebrow">INSTALLATION ADMINISTRATION</span>
           <h1>
-            One archive.
+            One installation.
             <br />
-            Endless <em>discoveries.</em>
+            Every <em>community.</em>
           </h1>
           <p>
-            The artists you follow.
+            Monitor services and delivery.
             <br />
-            The artwork you want to keep.
+            Manage global automation.
             <br />
-            All in your own space.
+            Keep your communities running.
           </p>
           <div className="login-orbit">
             <Archive size={88} strokeWidth={0.7} />
             <span>ARCHIVE</span>
           </div>
         </div>
-        <small>MADE FOR COLLECTORS OF INSPIRATION.</small>
+        <small>RESTRICTED TO THE INSTALLATION ADMINISTRATOR.</small>
       </div>
       <div className="login-form">
-        <span className="eyebrow">YOUR PERSONAL OBSERVATORY</span>
-        <h2>Welcome to your archive.</h2>
-        <p>Sign in with your installation’s access key.</p>
+        <span className="eyebrow">BOT ADMINISTRATOR</span>
+        <h2>Bot administration.</h2>
+        <p>Restricted to the bot administrator. Sign in with your installation’s access key.</p>
         <form
           onSubmit={async (e) => {
             e.preventDefault();
@@ -71,6 +71,9 @@ export default function Login({ onLogin }: { onLogin: () => void }) {
             to LewdArchive
           </button>
         </form>
+        <a className="community-admin" href="/community">
+          Looking for your server? Continue with Discord →
+        </a>
         <p className="hint">
           Use the <code>API_TOKEN</code> value from your installation’s <code>.env</code> file.
         </p>

@@ -57,6 +57,12 @@ services:
     environment:
       DATABASE_URL: postgres://lewdarchive:${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}@postgres:5432/lewdarchive
       API_TOKEN: ${API_TOKEN:?Set API_TOKEN in .env}
+      DISCORD_BOT_TOKEN: ${DISCORD_BOT_TOKEN:-}
+      DISCORD_APPLICATION_ID: ${DISCORD_APPLICATION_ID:-}
+      DISCORD_PUBLIC_KEY: ${DISCORD_PUBLIC_KEY:-}
+      DISCORD_CLIENT_SECRET: ${DISCORD_CLIENT_SECRET:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+      WD_TAGGER_URL: ${WD_TAGGER_URL:-}
       COOKIE_SECURE: ${COOKIE_SECURE:-false}
       MAX_DOWNLOAD_MB: ${MAX_DOWNLOAD_MB:-100}
       ALLOW_PRIVATE_FEED_HOSTS: rsshub,${ALLOW_PRIVATE_FEED_HOSTS:-}
@@ -69,7 +75,44 @@ services:
         condition: service_healthy
       rsshub:
         condition: service_healthy
+      tagger:
+        condition: service_healthy
+        required: false
+  tagger:
+    profiles: [ai]
+    build: ./tagger
+    restart: unless-stopped
+    init: true
+    environment:
+      WD_CPU_THREADS: ${WD_CPU_THREADS:-2}
+      WD_GENERAL_THRESHOLD: ${WD_GENERAL_THRESHOLD:-0.35}
+      WD_CHARACTER_THRESHOLD: ${WD_CHARACTER_THRESHOLD:-0.85}
+    volumes:
+      - wd_models:/models
+    # Internal service: raw images, no public listener or remote inference provider.
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5000/health', timeout=5).close()"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10m
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: lewdarchive_tunnel
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      - app
 volumes:
   postgres_data:
   media_data:
   rsshub_cache:
+  wd_models:

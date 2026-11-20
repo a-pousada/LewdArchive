@@ -1,7 +1,13 @@
+mod admin;
+mod ai;
 mod api;
+mod community;
 mod models;
 mod network;
+mod opml;
 mod parser;
+mod platforms;
+mod webhooks;
 mod worker;
 use axum::{
     Router, middleware,
@@ -17,6 +23,9 @@ use tower_http::{
 #[derive(Clone)]
 pub struct AppState {
     pool: sqlx::PgPool,
+    tagger: Option<Arc<ai::Tagger>>,
+    discord: Option<Arc<platforms::discord::Discord>>,
+    platforms: Arc<std::collections::HashMap<String, Arc<dyn platforms::Platform>>>,
     token: Arc<String>,
     secure_cookie: bool,
     download_dir: Arc<PathBuf>,
@@ -59,10 +68,23 @@ async fn main() -> anyhow::Result<()> {
     let download_dir =
         PathBuf::from(std::env::var("DOWNLOAD_DIR").unwrap_or("./data/downloads".into()));
     tokio::fs::create_dir_all(&download_dir).await?;
+    let discord = platforms::discord::Discord::from_env()?.map(Arc::new);
+    let mut platforms: std::collections::HashMap<String, Arc<dyn platforms::Platform>> =
+        std::collections::HashMap::new();
+    if let Some(d) = &discord {
+        platforms.insert("discord".into(), d.clone());
+    }
+    let secure_cookie = std::env::var("COOKIE_SECURE").unwrap_or_default() == "true"
+        || discord
+            .as_ref()
+            .is_some_and(|d| d.base_url.starts_with("https://"));
     let state = AppState {
+        tagger: ai::Tagger::from_env()?.map(Arc::new),
+        discord,
+        platforms: Arc::new(platforms),
         pool,
         token: Arc::new(token),
-        secure_cookie: std::env::var("COOKIE_SECURE").unwrap_or_default() == "true",
+        secure_cookie,
         download_dir: Arc::new(download_dir),
         max_download_bytes: std::env::var("MAX_DOWNLOAD_MB")
             .ok()
@@ -79,32 +101,27 @@ async fn main() -> anyhow::Result<()> {
             "/session",
             get(|| async { axum::Json(serde_json::json!({"ok":true})) }),
         )
-        .route("/feeds", get(api::feeds).post(api::add_feed))
-        .route("/feed-options", get(api::feed_options))
-        .route(
-            "/feeds/{id}",
-            axum::routing::put(api::edit_feed).delete(api::delete_feed),
-        )
-        .route("/feeds/{id}/sync", post(api::sync))
-        .route("/sync", post(api::sync_all))
-        .route("/entries", get(api::entries))
-        .route("/entries/read-all", post(api::read_all))
-        .route("/entries/{id}", axum::routing::patch(api::patch_entry))
-        .route("/entries/{id}/download", post(api::download_entry))
-        .route("/entries/{id}/discord", post(api::send_entry_discord))
-        .route("/stats", get(api::stats))
-        .route("/settings", get(api::settings).put(api::save_settings))
-        .route("/jobs", get(api::jobs))
-        .route("/jobs/{id}/retry", post(api::retry_job))
-        .route("/downloads", get(api::downloads))
-        .route("/downloads/{id}/file", get(api::file))
         .route_layer(middleware::from_fn_with_state(state.clone(), api::auth));
     let frontend = std::env::var("FRONTEND_DIR").unwrap_or("frontend/dist".into());
     let app = Router::new()
         .nest("/api", protected)
+        .nest("/api/admin", admin::routes(state.clone()))
+        .route(
+            "/api/{*path}",
+            axum::routing::any(|| async { axum::http::StatusCode::NOT_FOUND }),
+        )
+        .nest("/api/community", community::routes(state.clone()))
         .route("/api/login", post(api::login))
         .route("/api/logout", post(api::logout))
         .route("/health", get(api::health))
+        .route_service(
+            "/community/",
+            ServeFile::new(format!("{frontend}/index.html")),
+        )
+        .route_service(
+            "/community",
+            ServeFile::new(format!("{frontend}/index.html")),
+        )
         .fallback_service(
             ServeDir::new(&frontend)
                 .not_found_service(ServeFile::new(format!("{frontend}/index.html"))),
@@ -126,6 +143,8 @@ async fn main() -> anyhow::Result<()> {
         ))
         .layer(TraceLayer::new_for_http())
         .with_state(state.clone());
+    let tag_worker = tokio::spawn(community::tag_worker::run(state.clone()));
+    let community_worker = tokio::spawn(community::worker::run(state.clone()));
     let worker = tokio::spawn(worker::run(state));
     let address = std::env::var("BIND_ADDRESS").unwrap_or("0.0.0.0:8080".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
@@ -136,5 +155,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     worker.abort();
+    community_worker.abort();
+    tag_worker.abort();
     Ok(())
 }
