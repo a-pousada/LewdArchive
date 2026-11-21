@@ -2,6 +2,8 @@ services:
   postgres:
     image: postgres:17-alpine
     restart: unless-stopped
+    mem_limit: ${POSTGRES_MEM_LIMIT:-512m}
+    cpus: ${POSTGRES_CPUS:-1.0}
     environment:
       POSTGRES_DB: lewdarchive
       POSTGRES_USER: lewdarchive
@@ -16,6 +18,8 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    mem_limit: ${REDIS_MEM_LIMIT:-320m}
+    cpus: ${REDIS_CPUS:-0.5}
     command:
       [redis-server, --appendonly, 'yes', --maxmemory, 256mb, --maxmemory-policy, allkeys-lru]
     volumes:
@@ -28,6 +32,8 @@ services:
   rsshub:
     image: diygod/rsshub:chromium-bundled
     restart: unless-stopped
+    mem_limit: ${RSSHUB_MEM_LIMIT:-1024m}
+    cpus: ${RSSHUB_CPUS:-1.0}
     init: true
     shm_size: 256mb
     ports:
@@ -51,6 +57,8 @@ services:
   app:
     build: .
     restart: unless-stopped
+    mem_limit: ${APP_MEM_LIMIT:-512m}
+    cpus: ${APP_CPUS:-1.0}
     init: true
     ports:
       - 127.0.0.1:8080:8080
@@ -82,6 +90,8 @@ services:
     profiles: [ai]
     build: ./tagger
     restart: unless-stopped
+    mem_limit: ${TAGGER_MEM_LIMIT:-1536m}
+    cpus: ${TAGGER_CPUS:-2.0}
     init: true
     environment:
       WD_CPU_THREADS: ${WD_CPU_THREADS:-2}
@@ -106,6 +116,8 @@ services:
     image: cloudflare/cloudflared:latest
     container_name: lewdarchive_tunnel
     restart: unless-stopped
+    mem_limit: ${CLOUDFLARED_MEM_LIMIT:-128m}
+    cpus: ${CLOUDFLARED_CPUS:-0.5}
     command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
