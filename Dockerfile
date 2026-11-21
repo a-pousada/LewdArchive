@@ -1,15 +1,28 @@
+# syntax=docker/dockerfile:1
+
 FROM node:24-alpine AS web
 WORKDIR /web
 COPY frontend/package*.json ./
-RUN npm ci
+RUN --mount=type=cache,target=/root/.npm npm ci
 COPY frontend/ ./
 RUN npm run build
 
 FROM rust:1-bookworm AS server
 WORKDIR /build
 COPY Cargo.toml Cargo.lock ./
+COPY backend/Cargo.toml ./backend/Cargo.toml
+# Pre-build external dependencies so source edits under backend/src do not recompile all crates.
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    mkdir -p backend/src \
+    && printf 'fn main() {}\n' > backend/src/main.rs \
+    && cargo build --release --locked \
+    && rm -rf backend/src target/release/.fingerprint/lewdarchive-* target/release/lewdarchive*
 COPY backend/ ./backend/
-RUN cargo build --release --locked
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git \
+    touch backend/src/main.rs \
+    && cargo build --release --locked
 
 FROM debian:bookworm-slim
 RUN apt-get update \
