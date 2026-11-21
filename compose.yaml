@@ -103,6 +103,7 @@ services:
       retries: 3
       start_period: 10m
   cloudflared:
+    profiles: [tunnel]
     image: cloudflare/cloudflared:latest
     container_name: lewdarchive_tunnel
     restart: unless-stopped

@@ -39,7 +39,7 @@ Changing `POSTGRES_PASSWORD` does not change the password of an already initiali
 | `rsshub`   | `127.0.0.1:1200` | None; configuration via `.env.rsshub` |
 | `redis`    | Internal only    | `rsshub_cache`                        |
 
-Services have health checks and restart policies. The application runs as a non-root user. The optional RSSHub environment file requires Compose 2.24 or newer.
+Services have health checks and restart policies. The application runs as a non-root user. The optional RSSHub environment file requires Compose 2.24 or newer. The optional `cloudflared` tunnel service uses the `tunnel` profile (`docker compose --profile tunnel up -d`) so local setups and deployments behind an existing reverse proxy do not start an unconfigured tunnel container.
 
 For local backend development, the override publishes PostgreSQL on loopback:
 
