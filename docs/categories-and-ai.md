@@ -29,6 +29,8 @@ WD_TAGGER_URL=http://tagger:5000
 WD_CPU_THREADS=2
 WD_GENERAL_THRESHOLD=0.35
 WD_CHARACTER_THRESHOLD=0.85
+WD_MODEL_TTL=300
+WD_DEVICE=cpu
 ```
 
 Start it with Docker Compose 2.20+:
@@ -38,11 +40,11 @@ docker compose --profile ai up -d --build app tagger
 docker compose --profile ai logs -f tagger
 ```
 
-The first start downloads about 467 MB of model weights plus the vocabulary from Hugging Face. Both artifacts use an immutable revision and verified SHA-256 checksums. They persist in the `wd_models` volume. Startup reports readiness only after loading the model; Compose waits for a healthy tagger before starting the app when the `ai` profile is active. Subsequent starts use the cache. No images are sent to Hugging Face. The service does not persist submitted images, and ONNX telemetry is disabled.
+The first start downloads about 467 MB of model weights plus the vocabulary from Hugging Face. Both artifacts use an immutable revision and verified SHA-256 checksums. They persist in the `wd_models` volume. The service loads the model lazily on the first inference request and unloads it after `WD_MODEL_TTL` seconds of inactivity (default `300`; set `0` to keep it resident). Optional GPU inference is supported via `WD_RUNTIME=cuda` (with `tagger/requirements-cuda.txt`) and `WD_DEVICE=cuda`. Compose waits for a healthy tagger before starting the app when the `ai` profile is active. Subsequent starts use the cache. No images are sent to Hugging Face. The service does not persist submitted images, and ONNX telemetry is disabled.
 
 An empty `WD_TAGGER_URL` disables inference. The URL must be reachable from the application: `localhost` inside a container refers to that container. The bundled service exposes no host port and is intended only for the trusted application network; do not publish it publicly. For native development, run `pip install -r tagger/requirements.txt`, then `MODEL_CACHE=.test-runtime/wd-cache python tagger/service.py` and set the backend URL to `http://127.0.0.1:5000`. Native execution binds to loopback by default; the Docker image sets `WD_BIND_ADDRESS=0.0.0.0` for container networking.
 
-Preview and automatic tagging analyze the first two images in a post. The backend fetches public JPEG, PNG or WebP files, at most 5 MiB each, and sends image bytes to the configured service. Private hosts and unsafe redirects are blocked, even when the feed uses a private RSSHub. The decoder accepts at most 4096 pixels per side and 16 megapixels. Animated images use the first frame; videos are not analyzed. Posts without images have no AI preview and automatic jobs finish without retries. Titles, descriptions, artist identities and category labels are not inference inputs.
+Preview and automatic tagging inspect up to four image candidates until two succeed. The backend fetches public JPEG, PNG, WebP or GIF files, at most 5 MiB each, and sends image bytes to the configured service. Private hosts and unsafe redirects are blocked, even when the feed uses a private RSSHub. The decoder accepts at most 4096 pixels per side and 16 megapixels. Animated images (GIF and WebP) use the first frame; videos are not analyzed. Posts without images have no AI preview and automatic jobs finish without retries. Titles, descriptions, artist identities and category labels are not inference inputs.
 
 The service uses one inference at a time, two CPU threads by default, and configurable general/character thresholds. Higher thresholds produce fewer tags. Scores from two images merge by maximum confidence, duplicates are removed, and the top 30 tags are retained. A failed image does not discard successful results from the other image; if both fail, normal retries apply. Ratings are omitted and never control routing. Tags retain parentheses in names such as `character_(series)` while rejecting mentions and markup. Requests are bounded by time, input size and response size. Endpoint configuration is operator-only.
 
