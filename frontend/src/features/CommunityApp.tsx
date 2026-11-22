@@ -6,6 +6,7 @@ import WebhookManager from './WebhookManager';
 import WebhookActivity from './WebhookActivity';
 import Trending from './Trending';
 import ArtistProfile from './ArtistProfile';
+import BulkCategorize from './BulkCategorize';
 import Categories, { useCategories } from './Categories';
 import { TagBadges } from './PostTags';
 import { useEffect, useState } from 'react';
@@ -27,6 +28,7 @@ import {
   ArrowRight,
   ImageOff,
   LoaderCircle,
+  CheckSquare,
 } from 'lucide-react';
 import { Logo, Toggle } from '../components';
 import { ApiError, date } from '../api';
@@ -283,6 +285,10 @@ function Library({ serverId }: { serverId: string }) {
   const [category, setCategory] = useState('*');
   const [tag, setTag] = useState('');
   const [tagDraft, setTagDraft] = useState('');
+  const [artistSearch, setArtistSearch] = useState('');
+  const [bulkMode, setBulkMode] = useState(false);
+  const [selectedArtists, setSelectedArtists] = useState<Set<string>>(() => new Set());
+  const [bulkStatus, setBulkStatus] = useState('');
   const categories = useCategories(serverId);
   const categoryRows = Array.isArray(categories.data) ? categories.data : [];
   const [page, setPage] = useState(1);
@@ -290,6 +296,13 @@ function Library({ serverId }: { serverId: string }) {
   const [editingArtist, setEditingArtist] = useState<Artist | null>(null);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    setBulkMode(false);
+    setSelectedArtists(new Set());
+    setBulkStatus('');
+    setArtistSearch('');
+  }, [serverId]);
   const base = `/servers/${serverId}`;
   const server = useQuery({
     queryKey: ['community', serverId, 'server'],
@@ -342,8 +355,16 @@ function Library({ serverId }: { serverId: string }) {
     );
   const manager = server.data?.can_manage;
   const title = views.find((v) => v.id === view)!.label;
+  const normalizedArtistSearch = artistSearch.trim().toLowerCase();
   const filteredArtists =
-    artists.data?.filter((a) => category === '*' || (a.category || '') === category) ?? [];
+    artists.data?.filter(
+      (a) =>
+        (category === '*' || (a.category || '') === category) &&
+        (!normalizedArtistSearch ||
+          a.name.toLowerCase().includes(normalizedArtistSearch) ||
+          a.source.toLowerCase().includes(normalizedArtistSearch) ||
+          (a.category || 'uncategorized').toLowerCase().includes(normalizedArtistSearch)),
+    ) ?? [];
   return (
     <>
       <div className="community-heading">
@@ -374,6 +395,9 @@ function Library({ serverId }: { serverId: string }) {
                 setView(v.id);
                 setPage(1);
                 setError('');
+                setBulkMode(false);
+                setSelectedArtists(new Set());
+                setBulkStatus('');
               }}
             >
               <v.icon size={16} />
@@ -440,7 +464,19 @@ function Library({ serverId }: { serverId: string }) {
               <button className="button secondary">Apply filter</button>
             </>
           )}
-          {(category !== '*' || tag) && (
+          {artistView && (
+            <label>
+              Find artist
+              <input
+                aria-label="Find artist"
+                value={artistSearch}
+                onChange={(e) => setArtistSearch(e.target.value)}
+                placeholder="Name, source, or category"
+                maxLength={80}
+              />
+            </label>
+          )}
+          {(category !== '*' || tag || (artistView && artistSearch)) && (
             <button
               type="button"
               className="button secondary"
@@ -448,10 +484,24 @@ function Library({ serverId }: { serverId: string }) {
                 setCategory('*');
                 setTag('');
                 setTagDraft('');
+                setArtistSearch('');
                 setPage(1);
               }}
             >
               Clear filters
+            </button>
+          )}
+          {artistView && manager && (
+            <button
+              type="button"
+              className={bulkMode ? 'button selected' : 'button secondary'}
+              onClick={() => {
+                setBulkMode((v) => !v);
+                setBulkStatus('');
+              }}
+            >
+              <CheckSquare size={15} />
+              {bulkMode ? 'Done categorizing' : 'Bulk categorize'}
             </button>
           )}
         </form>
@@ -523,9 +573,49 @@ function Library({ serverId }: { serverId: string }) {
       )}
       {artistView && artists.data && (
         <>
+          {bulkStatus && (
+            <p className="notice" role="status">
+              {bulkStatus}
+            </p>
+          )}
+          {bulkMode && manager && (
+            <BulkCategorize
+              serverId={serverId}
+              artists={artists.data}
+              visibleArtists={filteredArtists}
+              categories={categoryRows.map((r) => r.category)}
+              selected={selectedArtists}
+              onSelectedChange={setSelectedArtists}
+              onApplied={(message) => {
+                setBulkStatus(message);
+                setBulkMode(false);
+              }}
+              onClose={() => {
+                setBulkMode(false);
+                setSelectedArtists(new Set());
+              }}
+            />
+          )}
           <div className="community-artists">
             {filteredArtists.map((a) => (
-              <article className="community-artist" key={a.id}>
+              <article
+                className={`community-artist${bulkMode && selectedArtists.has(a.id) ? ' selected' : ''}`}
+                key={a.id}
+              >
+                {bulkMode && manager && (
+                  <input
+                    type="checkbox"
+                    className="community-artist-select"
+                    aria-label={`Select ${a.name}`}
+                    checked={selectedArtists.has(a.id)}
+                    onChange={(e) => {
+                      const next = new Set(selectedArtists);
+                      if (e.target.checked) next.add(a.id);
+                      else next.delete(a.id);
+                      setSelectedArtists(next);
+                    }}
+                  />
+                )}
                 <div className="community-artist-avatar">
                   {a.avatar_url ? (
                     <img src={a.avatar_url} alt={a.name} referrerPolicy="no-referrer" />
@@ -623,9 +713,11 @@ function Library({ serverId }: { serverId: string }) {
           {!filteredArtists.length && (
             <div className="community-empty">
               <Users size={30} />
-              <h2>{category !== '*' ? 'No artists in this category.' : 'No artists yet.'}</h2>
+              <h2>
+                {category !== '*' || artistSearch ? 'No matching artists.' : 'No artists yet.'}
+              </h2>
               <p>
-                {category !== '*'
+                {category !== '*' || artistSearch
                   ? 'Choose another category or clear the filter.'
                   : view === 'favorite-artists'
                     ? 'Favorite an artist to keep them here.'

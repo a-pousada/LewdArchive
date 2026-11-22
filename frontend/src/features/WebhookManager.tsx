@@ -1,10 +1,35 @@
 import { useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { LoaderCircle, Pencil, Plus, Trash2, Volume2, Check } from 'lucide-react';
+import { LoaderCircle, Pencil, Plus, Send, Trash2, Volume2, Check } from 'lucide-react';
 import { communityApi } from './communityApi';
 import type { Webhook } from '../api';
 import { Modal, Toggle } from '../components';
 import { useCategories } from './Categories';
+
+function webhookCategories(webhook?: Webhook): string[] | null {
+  if (!webhook) return null;
+  if (webhook.category_filters && webhook.category_filters.length > 0) {
+    return webhook.category_filters;
+  }
+  if (webhook.category_filter != null) {
+    return [webhook.category_filter];
+  }
+  return null;
+}
+
+function parseTagInput(raw: string): string[] {
+  const tags: string[] = [];
+  for (const part of raw.split(',')) {
+    const clean = part.trim().replace(/^#+/, '').toLowerCase().replace(/\s+/g, '_');
+    if (clean && !tags.includes(clean)) tags.push(clean);
+  }
+  return tags;
+}
+
+function formatCategorySummary(categories: string[] | null): string {
+  if (!categories || categories.length === 0) return 'All categories';
+  return categories.map((c) => c || 'Uncategorized').join(', ');
+}
 
 export default function WebhookManager({ serverId }: { serverId: string }) {
   const base = `/servers/${serverId}/webhooks`;
@@ -16,8 +41,23 @@ export default function WebhookManager({ serverId }: { serverId: string }) {
   });
   const [editing, setEditing] = useState<Webhook | 'new' | null>(null);
   const [removing, setRemoving] = useState<Webhook | null>(null);
+  const [testingId, setTestingId] = useState<string | null>(null);
+  const [testStatus, setTestStatus] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  async function sendTest(webhook: Webhook) {
+    setTestingId(webhook.id);
+    setTestStatus('');
+    setError('');
+    try {
+      await api(`${base}/${webhook.id}/test`, 'POST');
+      setTestStatus(`Test message sent to ${webhook.name}.`);
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setTestingId(null);
+    }
+  }
   async function remove() {
     if (!removing) return;
     setBusy(true);
@@ -44,9 +84,19 @@ export default function WebhookManager({ serverId }: { serverId: string }) {
         </div>
       </div>
       <p className="hint">
-        New posts go to enabled webhooks matching their artist category. Each destination has its
-        own delivery status and retries.
+        New posts go to enabled webhooks matching their artist categories and optional tag filters.
+        Each destination has its own delivery status and retries.
       </p>
+      {testStatus && (
+        <p className="hint" role="status">
+          {testStatus}
+        </p>
+      )}
+      {error && !removing && (
+        <p className="error" role="alert">
+          {error}
+        </p>
+      )}
       {query.isPending && <p className="hint">Loading webhooks...</p>}
       {query.isError && (
         <p className="error" role="alert">
@@ -71,15 +121,31 @@ export default function WebhookManager({ serverId }: { serverId: string }) {
             <div className="webhook-info">
               <strong>{webhook.name}</strong>
               <small>{webhook.username || 'Default webhook identity'}</small>
-              <small>
-                {webhook.category_filter == null
-                  ? 'All categories'
-                  : webhook.category_filter || 'Uncategorized'}
-              </small>
+              <small>{formatCategorySummary(webhookCategories(webhook))}</small>
+              {(webhook.include_tags?.length ?? 0) > 0 && (
+                <small>Include: {webhook.include_tags!.map((t) => `#${t}`).join(', ')}</small>
+              )}
+              {(webhook.exclude_tags?.length ?? 0) > 0 && (
+                <small>Exclude: {webhook.exclude_tags!.map((t) => `#${t}`).join(', ')}</small>
+              )}
               <span className={`badge ${webhook.enabled ? 'good' : ''}`}>
                 {webhook.enabled ? 'Enabled' : 'Paused'}
               </span>
             </div>
+            <button
+              type="button"
+              className="icon-button"
+              aria-label={`Test webhook ${webhook.name}`}
+              title="Send test message"
+              disabled={testingId !== null}
+              onClick={() => void sendTest(webhook)}
+            >
+              {testingId === webhook.id ? (
+                <LoaderCircle className="spin" size={16} />
+              ) : (
+                <Send size={16} />
+              )}
+            </button>
             <button
               type="button"
               className="icon-button"
@@ -179,7 +245,11 @@ function WebhookEditor({
   onSaved: () => void;
 }) {
   const categories = useCategories(base.split('/')[2]);
-  const [category, setCategory] = useState(webhook?.category_filter ?? '*');
+  const [selectedCategories, setSelectedCategories] = useState<string[] | null>(() =>
+    webhookCategories(webhook),
+  );
+  const [includeTags, setIncludeTags] = useState(() => (webhook?.include_tags ?? []).join(', '));
+  const [excludeTags, setExcludeTags] = useState(() => (webhook?.exclude_tags ?? []).join(', '));
   const [name, setName] = useState(webhook?.name || '');
   const [url, setUrl] = useState('');
   const [username, setUsername] = useState(webhook?.username ?? 'LewdArchive');
@@ -190,6 +260,25 @@ function WebhookEditor({
   const [enabled, setEnabled] = useState(webhook?.enabled ?? true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+
+  const availableCategories = [
+    ...new Set([
+      ...(Array.isArray(categories.data) ? categories.data.map((r) => r.category) : []),
+      ...(selectedCategories ?? []).filter((c) => c !== ''),
+    ]),
+  ];
+
+  function toggleCategory(value: string) {
+    setSelectedCategories((current) => {
+      if (!current) return [value];
+      if (current.includes(value)) {
+        const next = current.filter((c) => c !== value);
+        return next.length > 0 ? next : null;
+      }
+      return [...current, value];
+    });
+  }
+
   return (
     <Modal
       wide
@@ -203,13 +292,18 @@ function WebhookEditor({
           setBusy(true);
           setError('');
           try {
+            const categoryList =
+              selectedCategories && selectedCategories.length > 0 ? selectedCategories : null;
             await api(webhook ? `${base}/${webhook.id}` : base, webhook ? 'PUT' : 'POST', {
               name,
               ...(url.trim() ? { url: url.trim() } : {}),
               username,
               avatar_url: avatar,
               embed_color: parseInt(color.slice(1), 16),
-              category_filter: category === '*' ? null : category,
+              category_filter: categoryList && categoryList.length === 1 ? categoryList[0] : null,
+              category_filters: categoryList,
+              include_tags: parseTagInput(includeTags),
+              exclude_tags: parseTagInput(excludeTags),
               enabled,
             });
             onSaved();
@@ -280,29 +374,87 @@ function WebhookEditor({
                 Public HTTPS image. Leave blank to use the destination’s default avatar.
               </small>
             </label>
-            <label className="full">
-              Category filter
-              <select
-                aria-label="Category filter"
-                value={category}
-                onChange={(e) => setCategory(e.target.value)}
-              >
-                <option value="*">All categories</option>
-                <option value="">Uncategorized only</option>
-                {[
-                  ...new Set([
-                    ...(Array.isArray(categories.data)
-                      ? categories.data.map((r) => r.category)
-                      : []),
-                    ...(category && category !== '*' ? [category] : []),
-                  ]),
-                ].map((c) => (
-                  <option key={c} value={c}>
+            <div className="full">
+              <label>
+                Category filter
+                <select
+                  aria-label="Category filter"
+                  value={
+                    selectedCategories == null
+                      ? '*'
+                      : selectedCategories.length === 1
+                        ? selectedCategories[0]
+                        : '__multi__'
+                  }
+                  onChange={(e) => {
+                    if (e.target.value === '*') setSelectedCategories(null);
+                    else if (e.target.value !== '__multi__')
+                      setSelectedCategories([e.target.value]);
+                  }}
+                >
+                  <option value="*">All categories</option>
+                  <option value="">Uncategorized only</option>
+                  {availableCategories.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                  {selectedCategories && selectedCategories.length > 1 && (
+                    <option value="__multi__">
+                      Multiple categories ({selectedCategories.length})
+                    </option>
+                  )}
+                </select>
+              </label>
+              <div className="webhook-category-chips" aria-label="Combine categories">
+                <button
+                  type="button"
+                  className={`category-chip ${selectedCategories == null ? 'active' : ''}`}
+                  onClick={() => setSelectedCategories(null)}
+                >
+                  All categories
+                </button>
+                <button
+                  type="button"
+                  className={`category-chip ${selectedCategories?.includes('') ? 'active' : ''}`}
+                  onClick={() => toggleCategory('')}
+                >
+                  Uncategorized
+                </button>
+                {availableCategories.map((c) => (
+                  <button
+                    key={c}
+                    type="button"
+                    className={`category-chip ${selectedCategories?.includes(c) ? 'active' : ''}`}
+                    onClick={() => toggleCategory(c)}
+                  >
                     {c}
-                  </option>
+                  </button>
                 ))}
-              </select>
-              <small>Only posts from artists in this category go to this destination.</small>
+              </div>
+              <small>
+                Only posts from artists in the selected categories go to this destination.
+              </small>
+            </div>
+            <label className="full">
+              Include tags
+              <input
+                aria-label="Include tags"
+                value={includeTags}
+                onChange={(e) => setIncludeTags(e.target.value)}
+                placeholder="e.g. 3d, blender, photorealistic"
+              />
+              <small>Optional comma-separated tags. At least one must match.</small>
+            </label>
+            <label className="full">
+              Exclude tags
+              <input
+                aria-label="Exclude tags"
+                value={excludeTags}
+                onChange={(e) => setExcludeTags(e.target.value)}
+                placeholder="e.g. furry, monochrome"
+              />
+              <small>Optional comma-separated tags. Matching posts are skipped.</small>
             </label>
             <label className="full color-field">
               Message color

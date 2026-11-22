@@ -50,16 +50,25 @@ async fn cycle(s: &AppState) -> Result<()> {
             .fetch_one(&s.pool)
             .await?;
     for _ in 0..10 {
-        let job: Option<Job> = sqlx::query_as("UPDATE jobs SET status='processing',locked_at=now(),attempts=attempts+1,updated_at=now() WHERE id=(SELECT id FROM jobs WHERE status='pending' AND next_attempt_at<=now() AND ((kind='download' AND $1 AND EXISTS(SELECT 1 FROM entries e JOIN community_artists a ON a.feed_id=e.feed_id WHERE e.id=jobs.entry_id)) OR (kind='discord' AND $2 AND EXISTS(SELECT 1 FROM webhooks w WHERE w.id=jobs.webhook_id AND w.enabled AND (w.community_id IS NOT NULL AND EXISTS(SELECT 1 FROM communities c JOIN community_artists a ON a.community_id=c.id JOIN entries e ON e.feed_id=a.feed_id WHERE c.id=w.community_id AND c.enabled AND a.enabled AND (NOT $3 OR NOT c.ai_tags_enabled OR NOT EXISTS(SELECT 1 FROM community_tag_jobs t WHERE t.community_id=c.id AND t.entry_id=jobs.entry_id AND t.status IN('pending','processing') AND t.created_at>now()-interval '5 minutes')) AND (w.category_filter IS NULL OR w.category_filter=a.category) AND e.id=jobs.entry_id))))) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,entry_id,kind,webhook_id,status,attempts,last_error,created_at,updated_at")
+        let job: Option<Job> = sqlx::query_as("UPDATE jobs SET status='processing',locked_at=now(),attempts=attempts+1,updated_at=now() WHERE id=(SELECT id FROM jobs WHERE status='pending' AND next_attempt_at<=now() AND ((kind='download' AND $1 AND EXISTS(SELECT 1 FROM entries e JOIN community_artists a ON a.feed_id=e.feed_id WHERE e.id=jobs.entry_id)) OR (kind='discord' AND $2 AND EXISTS(SELECT 1 FROM webhooks w WHERE w.id=jobs.webhook_id AND w.enabled AND (w.community_id IS NOT NULL AND EXISTS(SELECT 1 FROM communities c JOIN community_artists a ON a.community_id=c.id JOIN entries e ON e.feed_id=a.feed_id WHERE c.id=w.community_id AND c.enabled AND a.enabled AND (NOT $3 OR NOT c.ai_tags_enabled OR NOT EXISTS(SELECT 1 FROM community_tag_jobs t WHERE t.community_id=c.id AND t.entry_id=jobs.entry_id AND t.status IN('pending','processing') AND t.created_at>now()-interval '5 minutes')) AND ((w.category_filters IS NULL AND w.category_filter IS NULL) OR a.category = ANY(coalesce(w.category_filters, ARRAY[w.category_filter]))) AND e.id=jobs.entry_id))))) ORDER BY next_attempt_at FOR UPDATE SKIP LOCKED LIMIT 1) RETURNING id,entry_id,kind,webhook_id,status,attempts,last_error,created_at,updated_at")
             .bind(settings.downloads_enabled).bind(settings.notifications_enabled).bind(s.tagger.is_some()).fetch_optional(&s.pool).await?;
         let Some(job) = job else { break };
         let result = tokio::time::timeout(Duration::from_secs(600), execute(s, &job))
             .await
             .unwrap_or_else(|_| Err(anyhow::anyhow!("Job exceeded the 10-minute time limit")));
+        let outcome_done = matches!(result, Ok(DeliveryOutcome::Done));
         match result {
-            Ok(()) => {
+            Ok(DeliveryOutcome::Done) => {
                 sqlx::query(
-                    "UPDATE jobs SET status='done',last_error=NULL,updated_at=now() WHERE id=$1",
+                    "UPDATE jobs SET status='done',last_error=NULL,locked_at=NULL,updated_at=now() WHERE id=$1",
+                )
+                .bind(job.id)
+                .execute(&s.pool)
+                .await?;
+            }
+            Ok(DeliveryOutcome::Skipped) => {
+                sqlx::query(
+                    "UPDATE jobs SET status='skipped',last_error=NULL,locked_at=NULL,updated_at=now() WHERE id=$1",
                 )
                 .bind(job.id)
                 .execute(&s.pool)
@@ -75,7 +84,9 @@ async fn cycle(s: &AppState) -> Result<()> {
                     .bind(e.to_string().chars().take(500).collect::<String>()).bind(retry as f64).execute(&s.pool).await?;
             }
         }
-        tokio::time::sleep(Duration::from_millis(600)).await;
+        if outcome_done || job.attempts > 0 {
+            tokio::time::sleep(Duration::from_millis(600)).await;
+        }
     }
     Ok(())
 }
@@ -125,7 +136,12 @@ async fn poll(s: &AppState, feed: &Feed) -> Result<()> {
     tx.commit().await?;
     Ok(())
 }
-async fn execute(s: &AppState, job: &Job) -> Result<()> {
+enum DeliveryOutcome {
+    Done,
+    Skipped,
+}
+
+async fn execute(s: &AppState, job: &Job) -> Result<DeliveryOutcome> {
     let mut entry: Entry = sqlx::query_as("SELECT e.id,e.feed_id,e.title,e.author,e.url,e.summary,e.media,e.published_at,f.name AS feed_name,f.source FROM entries e JOIN feeds f ON f.id=e.feed_id WHERE e.id=$1")
         .bind(job.entry_id).fetch_one(&s.pool).await?;
     if job.kind == "discord" {
@@ -143,14 +159,33 @@ async fn execute(s: &AppState, job: &Job) -> Result<()> {
                 .await?;
         if let Some(server) = community {
             entry.feed_name=sqlx::query_scalar("SELECT a.name FROM community_artists a JOIN communities c ON c.id=a.community_id WHERE a.community_id=$1 AND a.feed_id=$2 AND a.enabled AND c.enabled").bind(server).bind(entry.feed_id).fetch_optional(&s.pool).await?.context("Server artist announcements are paused or removed")?;
+            if !webhook.include_tags.is_empty() || !webhook.exclude_tags.is_empty() {
+                let tags: Vec<String> = sqlx::query_scalar(
+                    "SELECT coalesce(tags,'{}'::text[]) FROM community_post_tags WHERE community_id=$1 AND entry_id=$2",
+                )
+                .bind(server)
+                .bind(entry.id)
+                .fetch_optional(&s.pool)
+                .await?
+                .unwrap_or_default();
+                if !crate::webhooks::matches_tags(
+                    &webhook.include_tags,
+                    &webhook.exclude_tags,
+                    &tags,
+                ) {
+                    return Ok(DeliveryOutcome::Skipped);
+                }
+            }
         }
         let mut payload = discord_payload(&entry, &webhook)?;
         if let Some(server) = community {
             crate::community::tags::decorate(s, server, entry.id, &mut payload).await?;
         }
-        send_discord(&webhook, &payload).await
+        send_discord(&webhook, &payload).await?;
+        Ok(DeliveryOutcome::Done)
     } else {
-        download(s, &entry).await
+        download(s, &entry).await?;
+        Ok(DeliveryOutcome::Done)
     }
 }
 #[derive(Debug)]
@@ -161,7 +196,7 @@ impl std::fmt::Display for RateLimited {
     }
 }
 impl std::error::Error for RateLimited {}
-async fn send_discord(webhook: &Webhook, payload: &serde_json::Value) -> Result<()> {
+pub(crate) async fn send_discord(webhook: &Webhook, payload: &serde_json::Value) -> Result<()> {
     let mut url = network::webhook(&webhook.url)?;
     url.query_pairs_mut().append_pair("wait", "true");
     let client = network::public_webhook_client(&url).await?;
@@ -280,6 +315,9 @@ mod tests {
         };
         let mut webhook = Webhook {
             category_filter: None,
+            category_filters: None,
+            include_tags: Vec::new(),
+            exclude_tags: Vec::new(),
             id: Uuid::new_v4(),
             name: "Art channel".into(),
             url: String::new(),

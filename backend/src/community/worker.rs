@@ -11,7 +11,7 @@ pub async fn enqueue(
     entry: Uuid,
 ) -> Result<()> {
     sqlx::query("INSERT INTO community_tag_jobs(community_id,entry_id,artist_id) SELECT a.community_id,$2,a.id FROM community_artists a JOIN communities c ON c.id=a.community_id WHERE a.feed_id=$1 AND c.ai_tags_enabled ON CONFLICT DO NOTHING").bind(feed).bind(entry).execute(&mut **tx).await?;
-    let webhooks:Vec<Uuid>=sqlx::query_scalar("SELECT w.id FROM webhooks w JOIN community_artists a ON a.community_id=w.community_id WHERE a.feed_id=$1 AND a.enabled AND w.enabled AND (w.category_filter IS NULL OR w.category_filter=a.category) ORDER BY w.id FOR SHARE OF w,a").bind(feed).fetch_all(&mut **tx).await?;
+    let webhooks:Vec<Uuid>=sqlx::query_scalar("SELECT w.id FROM webhooks w JOIN community_artists a ON a.community_id=w.community_id WHERE a.feed_id=$1 AND a.enabled AND w.enabled AND ((w.category_filters IS NULL AND w.category_filter IS NULL) OR a.category = ANY(coalesce(w.category_filters, ARRAY[w.category_filter]))) ORDER BY w.id FOR SHARE OF w,a").bind(feed).fetch_all(&mut **tx).await?;
     for webhook in webhooks {
         sqlx::query("INSERT INTO jobs(id,entry_id,kind,webhook_id) VALUES($1,$2,'discord',$3) ON CONFLICT ON CONSTRAINT jobs_delivery_key DO NOTHING").bind(Uuid::new_v4()).bind(entry).bind(webhook).execute(&mut **tx).await?;
     }

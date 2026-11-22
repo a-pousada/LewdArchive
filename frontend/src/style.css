@@ -2657,6 +2657,75 @@ td .button {
 .tag-suggestions button.tag-badge {
   cursor: pointer;
 }
+.webhook-category-chips,
+.bulk-categorize-presets,
+.bulk-categorize-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+.category-chip {
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid #37333f;
+  background: #15151b;
+  color: #c7bfd6;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.category-chip:hover:not(:disabled) {
+  border-color: var(--pink);
+  color: #f3ecf5;
+}
+.category-chip.active {
+  background: var(--pink-dim);
+  border-color: var(--pink);
+  color: #f7dce6;
+}
+.bulk-categorize-panel {
+  margin: 16px 0 20px;
+  display: grid;
+  gap: 14px;
+}
+.bulk-categorize-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+.bulk-categorize-header h2,
+.bulk-categorize-header p {
+  margin: 0;
+}
+.bulk-legacy-groups small {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+}
+.bulk-categorize-controls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.bulk-categorize-controls label {
+  flex: 1;
+  min-width: 220px;
+  margin: 0;
+}
+.community-artist.selected {
+  border-color: var(--pink);
+  background: #211b24;
+}
+.community-artist-select {
+  width: 18px;
+  height: 18px;
+  accent-color: var(--pink);
+  cursor: pointer;
+  flex-shrink: 0;
+}
 @media (max-width: 640px) {
   .category-routes,
   .category-route-form {
