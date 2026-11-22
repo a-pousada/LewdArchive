@@ -95,8 +95,11 @@ impl Tagger {
             .unwrap_or("")
             .trim();
         ensure!(
-            matches!(content_type, "image/jpeg" | "image/png" | "image/webp"),
-            "WD images must be JPEG, PNG or WebP"
+            matches!(
+                content_type,
+                "image/jpeg" | "image/png" | "image/webp" | "image/gif"
+            ),
+            "WD images must be JPEG, PNG, WebP or GIF"
         );
         network::limited_body(response, 5 * 1024 * 1024)
             .await
@@ -134,7 +137,8 @@ impl Tagger {
 
     pub async fn suggest(&self, media: &Value) -> Result<Vec<String>> {
         let media: Vec<Media> = serde_json::from_value(media.clone())?;
-        let images: Vec<_> = media.iter().filter(|m| m.kind == "image").take(2).collect();
+        // Inspect up to 4 image candidates so one incompatible/broken file does not block up to 2 results.
+        let images: Vec<_> = media.iter().filter(|m| m.kind == "image").take(4).collect();
         // Text/video-only posts finish immediately instead of retrying and delaying delivery.
         if images.is_empty() {
             return Ok(Vec::new());
@@ -148,6 +152,9 @@ impl Tagger {
             let mut successes = 0;
             let mut last_error = None;
             for image in images {
+                if successes >= 2 {
+                    break;
+                }
                 let result = async {
                     let bytes = self.fetch_image(&image.url).await?;
                     let predictions = self.classify(bytes).await?;
@@ -255,6 +262,13 @@ mod tests {
             {"kind":"image","url":"https://fixtures.invalid/image.png"}
         ]);
         assert_eq!(tagger.suggest(&partial).await.unwrap().len(), 2);
+        let fallback = json!([
+            {"kind":"image","url":"http://127.0.0.1/blocked"},
+            {"kind":"image","url":"https://fixtures.invalid/image.png"},
+            {"kind":"image","url":"https://fixtures.invalid/image.png"},
+            {"kind":"image","url":"http://127.0.0.1/never-fetched"}
+        ]);
+        assert_eq!(tagger.suggest(&fallback).await.unwrap().len(), 2);
         task.abort();
     }
 }

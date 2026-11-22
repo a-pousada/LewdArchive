@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -32,11 +33,18 @@ class PreprocessingTests(unittest.TestCase):
         self.assertTrue(np.all(transparent == 255))
 
     def test_formats_and_limits(self):
-        for format in ["PNG", "JPEG", "WEBP"]:
+        for format in ["PNG", "JPEG", "WEBP", "GIF"]:
             self.assertEqual(service.prepare(image_bytes(format=format), 448).shape[0], 1)
+        animated_gif = io.BytesIO()
+        frame0 = Image.new("RGB", (32, 16), "blue")
+        frame1 = Image.new("RGB", (32, 16), "green")
+        frame0.save(animated_gif, format="GIF", save_all=True, append_images=[frame1], loop=0)
+        anim_tensor = service.prepare(animated_gif.getvalue(), 448)
+        self.assertEqual(anim_tensor.shape, (1, 448, 448, 3))
+        np.testing.assert_array_equal(anim_tensor[0, 224, 224], [255, 0, 0])
         for data in [
             b"", b"not an image", b"x" * (service.MAX_BYTES + 1),
-            image_bytes(format="GIF"), image_bytes(size=(4097, 1)),
+            image_bytes(format="BMP"), image_bytes(size=(4097, 1)),
             image_bytes(size=(4096, 4096)),
         ]:
             with self.assertRaises(ValueError):
@@ -80,6 +88,58 @@ class PreprocessingTests(unittest.TestCase):
             with patch.dict(os.environ, {"WD_GENERAL_THRESHOLD": value}):
                 with self.assertRaises(ValueError):
                     service.setting("WD_GENERAL_THRESHOLD", ".35", 0, 1)
+        for valid in ["cpu", "cuda", "auto", " CUDA "]:
+            with patch.dict(os.environ, {"WD_DEVICE": valid}):
+                self.assertIn(service.device_setting(), {"cpu", "cuda", "auto"})
+        with patch.dict(os.environ, {"WD_DEVICE": "tpu"}):
+            with self.assertRaises(ValueError):
+                service.device_setting()
+
+    def test_lazy_load_and_idle_unload(self):
+        class FakeTensor:
+            def __init__(self, name, shape, dtype):
+                self.name = name
+                self.shape = shape
+                self.type = dtype
+
+        class FakeSession:
+            def __init__(self, path, sess_options=None, providers=None):
+                self.providers = providers or ["CPUExecutionProvider"]
+
+            def get_inputs(self):
+                return [FakeTensor("input_1", [1, 448, 448, 3], "tensor(float)")]
+
+            def get_outputs(self):
+                return [FakeTensor("output_1", [1, 2], "tensor(float)")]
+
+            def get_providers(self):
+                return ["CPUExecutionProvider"]
+
+            def run(self, output_names, inputs):
+                return [np.array([[0.9, 0.1]], dtype=np.float32)]
+
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp)
+            (cache / "model.onnx").write_bytes(b"fake")
+            (cache / "selected_tags.csv").write_text(
+                "name,category\nblue_sky,0\nrating_safe,9\n", encoding="utf-8"
+            )
+            with patch.dict(os.environ, {"WD_MODEL_TTL": "0.15", "WD_DEVICE": "cpu"}), \
+                 patch.object(service, "model_files", return_value=cache), \
+                 patch.object(service.ort, "InferenceSession", side_effect=FakeSession):
+                classifier = service.Classifier()
+                try:
+                    self.assertFalse(classifier.loaded)
+                    with self.assertRaises(ValueError):
+                        classifier.classify(b"broken")
+                    self.assertFalse(classifier.loaded)
+                    result = classifier.classify(image_bytes())
+                    self.assertTrue(classifier.loaded)
+                    self.assertEqual([t["name"] for t in result["tags"]], ["blue_sky"])
+                    time.sleep(0.35)
+                    self.assertFalse(classifier.loaded)
+                finally:
+                    classifier.close()
 
 
 class StubClassifier:

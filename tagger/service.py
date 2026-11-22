@@ -1,5 +1,7 @@
-"""Local WD image classification with bounded CPU use and immutable weights."""
+"""Local WD image classification with bounded memory use and immutable weights."""
 import csv
+import ctypes
+import gc
 import hashlib
 import io
 import json
@@ -8,6 +10,8 @@ import math
 import os
 from pathlib import Path
 import tempfile
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.request import urlopen
 import warnings
@@ -33,6 +37,21 @@ def setting(name, default, minimum, maximum, cast=float):
     if not math.isfinite(value) or not minimum <= value <= maximum:
         raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
+
+
+def device_setting():
+    value = os.environ.get("WD_DEVICE", "cpu").strip().lower()
+    if value not in {"cpu", "cuda", "auto"}:
+        raise ValueError("WD_DEVICE must be one of: cpu, cuda, auto")
+    return value
+
+
+def _trim_memory():
+    gc.collect()
+    try:
+        ctypes.CDLL("libc.so.6").malloc_trim(0)
+    except Exception:
+        pass
 
 
 def digest(path):
@@ -79,8 +98,8 @@ def prepare(data, size):
         raise ValueError("Image must contain between 1 byte and 5 MiB")
     try:
         with Image.open(io.BytesIO(data)) as original:
-            if original.format not in {"JPEG", "PNG", "WEBP"}:
-                raise ValueError("Use JPEG, PNG or WebP images")
+            if original.format not in {"JPEG", "PNG", "WEBP", "GIF"}:
+                raise ValueError("Use JPEG, PNG, WebP or GIF images")
             # Bound square-padding memory too, including pathological panoramas.
             if max(original.size) > 4096 or original.width * original.height > Image.MAX_IMAGE_PIXELS:
                 raise ValueError("Image exceeds 4096 pixels per side or 16 megapixels")
@@ -119,31 +138,126 @@ class Classifier:
     def __init__(self):
         self.general = setting("WD_GENERAL_THRESHOLD", "0.35", 0, 1)
         self.character = setting("WD_CHARACTER_THRESHOLD", "0.85", 0, 1)
-        threads = setting("WD_CPU_THREADS", "2", 1, 32, int)
-        cache = model_files()
+        self.threads = setting("WD_CPU_THREADS", "2", 1, 32, int)
+        self.ttl = setting("WD_MODEL_TTL", "300", 0, 86400, float)
+        self.device = device_setting()
+        self.gpu_mem_limit_mb = setting("WD_GPU_MEM_LIMIT_MB", "1536", 256, 32768, int)
+        self.cache = model_files()
+        with (self.cache / "selected_tags.csv").open(newline="", encoding="utf-8") as file:
+            self.labels = [(row["name"], int(row["category"])) for row in csv.DictReader(file)]
+        if not self.labels:
+            raise ValueError("Model vocabulary is empty")
+        self.size = 448
+        self.session = None
+        self.input = None
+        self.active_provider = None
+        self._lock = threading.Lock()
+        self._last_used = 0.0
+        self._stop = threading.Event()
+        self._watchdog = None
+        if self.ttl == 0:
+            with self._lock:
+                self._load_session()
+        else:
+            self._watchdog = threading.Thread(target=self._idle_loop, daemon=True)
+            self._watchdog.start()
+            logging.info(
+                "WD ready (lazy): %s, device=%s, threads=%s, ttl=%ss, labels=%s",
+                MODEL, self.device, self.threads, self.ttl, len(self.labels),
+            )
+
+    @property
+    def loaded(self):
+        return self.session is not None
+
+    def _resolve_providers(self):
+        if self.device in {"cuda", "auto"}:
+            if hasattr(ort, "preload_dlls"):
+                try:
+                    ort.preload_dlls()
+                except Exception as exc:
+                    logging.warning("ONNX preload_dlls failed: %s", exc)
+            available = ort.get_available_providers()
+            if "CUDAExecutionProvider" in available:
+                return [
+                    (
+                        "CUDAExecutionProvider",
+                        {
+                            "arena_extend_strategy": "kSameAsRequested",
+                            "gpu_mem_limit": self.gpu_mem_limit_mb * 1024 * 1024,
+                        },
+                    ),
+                    "CPUExecutionProvider",
+                ]
+            if self.device == "cuda":
+                raise RuntimeError(
+                    f"WD_DEVICE=cuda requested, but available providers are {available}"
+                )
+        return ["CPUExecutionProvider"]
+
+    def _load_session(self):
         options = ort.SessionOptions()
-        options.intra_op_num_threads = threads
+        options.intra_op_num_threads = self.threads
         options.inter_op_num_threads = 1
         options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
         options.add_session_config_entry("session.intra_op.allow_spinning", "0")
-        self.session = ort.InferenceSession(
-            str(cache / "model.onnx"), sess_options=options,
-            providers=["CPUExecutionProvider"],
+        if self.ttl > 0:
+            # Disable CPU memory arena when TTL unload is active so RAM returns to OS cleanly.
+            options.enable_cpu_mem_arena = False
+        providers = self._resolve_providers()
+        session = ort.InferenceSession(
+            str(self.cache / "model.onnx"), sess_options=options,
+            providers=providers,
         )
-        tensor = self.session.get_inputs()[0]
-        self.input = tensor.name
-        self.size = tensor.shape[1]
+        tensor = session.get_inputs()[0]
         if tensor.shape[1:] != [448, 448, 3] or tensor.type != "tensor(float)":
             raise ValueError("Unexpected WD input shape")
-        with (cache / "selected_tags.csv").open(newline="", encoding="utf-8") as file:
-            self.labels = [(row["name"], int(row["category"])) for row in csv.DictReader(file)]
-        if self.session.get_outputs()[0].shape[-1] != len(self.labels):
+        if session.get_outputs()[0].shape[-1] != len(self.labels):
             raise ValueError("Model and label vocabulary do not match")
-        logging.info("WD ready: %s, %s CPU threads, %s labels", MODEL, threads, len(self.labels))
+        self.session = session
+        self.input = tensor.name
+        self.size = tensor.shape[1]
+        self.active_provider = session.get_providers()[0]
+        self._last_used = time.monotonic()
+        logging.info(
+            "WD model loaded: %s, provider=%s, threads=%s, ttl=%ss",
+            MODEL, self.active_provider, self.threads, self.ttl,
+        )
+
+    def unload(self):
+        with self._lock:
+            if self.session is not None:
+                self.session = None
+                self.input = None
+                self.active_provider = None
+                _trim_memory()
+                logging.info("Unloaded idle WD model")
+
+    def _idle_loop(self):
+        interval = min(15.0, max(0.05, self.ttl / 4.0))
+        while not self._stop.wait(interval):
+            with self._lock:
+                if self.session is not None and (time.monotonic() - self._last_used) >= self.ttl:
+                    self.session = None
+                    self.input = None
+                    self.active_provider = None
+                    _trim_memory()
+                    logging.info("Unloaded idle WD model after %.1fs", self.ttl)
+
+    def close(self):
+        self._stop.set()
+        self.unload()
+        if self._watchdog is not None and self._watchdog.is_alive():
+            self._watchdog.join(timeout=2)
 
     def classify(self, data):
         tensor = prepare(data, self.size)
-        scores = self.session.run(None, {self.input: tensor})[0][0]
+        with self._lock:
+            if self.session is None:
+                self._load_session()
+            self._last_used = time.monotonic()
+            scores = self.session.run(None, {self.input: tensor})[0][0]
+            self._last_used = time.monotonic()
         return {
             "model": MODEL, "revision": REVISION,
             "tags": select_tags(scores, self.labels, self.general, self.character),
@@ -175,7 +289,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            self.reply(200, {"ready": True, "model": MODEL, "revision": REVISION})
+            self.reply(200, {
+                "ready": True,
+                "model": MODEL,
+                "revision": REVISION,
+                "loaded": getattr(self.server.classifier, "loaded", True),
+                "device": getattr(self.server.classifier, "active_provider", None),
+            })
         else:
             self.reply(404, {"error": "Not found"})
 

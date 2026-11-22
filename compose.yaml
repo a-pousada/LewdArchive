@@ -18,10 +18,10 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    mem_limit: ${REDIS_MEM_LIMIT:-320m}
+    mem_limit: ${REDIS_MEM_LIMIT:-128m}
     cpus: ${REDIS_CPUS:-0.5}
     command:
-      [redis-server, --appendonly, 'yes', --maxmemory, 256mb, --maxmemory-policy, allkeys-lru]
+      [redis-server, --save, '', --appendonly, 'no', --maxmemory, 64mb, --maxmemory-policy, allkeys-lru]
     volumes:
       - rsshub_cache:/data
     healthcheck:
@@ -30,12 +30,11 @@ services:
       timeout: 5s
       retries: 5
   rsshub:
-    image: diygod/rsshub:chromium-bundled
+    image: diygod/rsshub:latest
     restart: unless-stopped
-    mem_limit: ${RSSHUB_MEM_LIMIT:-1024m}
+    mem_limit: ${RSSHUB_MEM_LIMIT:-512m}
     cpus: ${RSSHUB_CPUS:-1.0}
     init: true
-    shm_size: 256mb
     ports:
       - 127.0.0.1:1200:1200
     env_file:
@@ -97,6 +96,9 @@ services:
       WD_CPU_THREADS: ${WD_CPU_THREADS:-2}
       WD_GENERAL_THRESHOLD: ${WD_GENERAL_THRESHOLD:-0.35}
       WD_CHARACTER_THRESHOLD: ${WD_CHARACTER_THRESHOLD:-0.85}
+      WD_MODEL_TTL: ${WD_MODEL_TTL:-300}
+      WD_DEVICE: ${WD_DEVICE:-cpu}
+      WD_GPU_MEM_LIMIT_MB: ${WD_GPU_MEM_LIMIT_MB:-1536}
     volumes:
       - wd_models:/models
     # Internal service: raw images, no public listener or remote inference provider.

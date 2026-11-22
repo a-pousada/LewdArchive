@@ -32,6 +32,10 @@ The service pins SwinV2 revision `627aef95638667ddcaa3ac8ae625e88ea5b02f51`. `ta
 
 Images receive EXIF orientation correction, white alpha compositing and square padding, followed by bicubic resize and BGR float32 conversion. General and character thresholds default to 0.35 and 0.85; they are operational starting points, not calibrated guarantees. No quantization was applied because its accuracy impact on this library has not been evaluated.
 
+## Idle unload and optional GPU runtime
+
+By default (`WD_MODEL_TTL=300`), the tagger starts without allocating the ONNX Runtime session, loads it lazily on the first `/v1/tag` request, and unloads it back to OS memory after 5 minutes of inactivity (`0` disables unloading). For hosts with an NVIDIA GPU, build with `--build-arg WD_RUNTIME=cuda` (uses `tagger/requirements-cuda.txt` with `onnxruntime-gpu[cuda,cudnn]==1.31.0`) and set `WD_DEVICE=cuda` (or `auto`) alongside `WD_GPU_MEM_LIMIT_MB` (default `1536`).
+
 Tests without model downloads:
 
 ```sh
