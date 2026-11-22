@@ -109,10 +109,10 @@ pub async fn artists(
     State(s): State<AppState>,
     Extension(user): Extension<User>,
     Path(id): Path<Uuid>,
-    Query(q): Query<Filter>,
+    Query(q): Query<service::ArtistFilter>,
 ) -> Result<Json<Value>> {
     service::authorize(&s, &user, id, false).await?;
-    Ok(Json(service::artists(&s, id, user.id, q.favorites).await?))
+    Ok(Json(service::artists(&s, id, user.id, &q).await?))
 }
 pub async fn track(
     State(s): State<AppState>,
@@ -258,6 +258,44 @@ pub async fn post_detail(
     Path((server, post)): Path<(Uuid, Uuid)>,
 ) -> Result<Json<Value>> {
     let (_, manager) = service::authorize(&s, &user, server, false).await?;
-    let value:Value=sqlx::query_scalar("SELECT jsonb_build_object('id',e.id,'artist_id',a.id,'title',e.title,'author',e.author,'url',e.url,'summary',e.summary,'media',e.media,'published_at',e.published_at,'feed_name',a.name,'category',a.category,'tags_source',(SELECT t.source FROM community_post_tags t WHERE t.community_id=$1 AND t.entry_id=e.id),'tags',coalesce((SELECT t.tags FROM community_post_tags t WHERE t.community_id=$1 AND t.entry_id=e.id),'{}'::text[]),'favorite',coalesce(p.favorite,false),'liked',coalesce(p.liked,false),'likes',(SELECT count(*) FROM post_preferences l WHERE l.community_id=$1 AND l.entry_id=e.id AND l.liked)) FROM entries e JOIN community_artists a ON a.feed_id=e.feed_id AND a.community_id=$1 LEFT JOIN post_preferences p ON p.entry_id=e.id AND p.community_id=$1 AND p.user_id=$2 WHERE e.id=$3").bind(server).bind(user.id).bind(post).fetch_optional(&s.pool).await?.ok_or_else(crate::api::not_found)?;
+    let value:Value=sqlx::query_scalar("SELECT jsonb_build_object('id',e.id,'artist_id',a.id,'title',e.title,'author',e.author,'url',e.url,'summary',e.summary,'media',e.media,'published_at',e.published_at,'feed_name',a.name,'category',a.category,'tags_source',t.source,'tags',coalesce(t.tags,'{}'::text[]),'favorite',coalesce(p.favorite,false),'liked',coalesce(p.liked,false),'likes',(SELECT count(*) FROM post_preferences l WHERE l.community_id=$1 AND l.entry_id=e.id AND l.liked)) FROM entries e JOIN community_artists a ON a.feed_id=e.feed_id AND a.community_id=$1 LEFT JOIN post_preferences p ON p.entry_id=e.id AND p.community_id=$1 AND p.user_id=$2 LEFT JOIN community_post_tags t ON t.community_id=$1 AND t.entry_id=e.id WHERE e.id=$3").bind(server).bind(user.id).bind(post).fetch_optional(&s.pool).await?.ok_or_else(crate::api::not_found)?;
     Ok(Json(json!({"post":value,"can_manage":manager})))
+}
+
+pub async fn feed_health(
+    State(s): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(server): Path<Uuid>,
+) -> Result<Json<Value>> {
+    service::authorize(&s, &user, server, true).await?;
+    let summary: Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object('total',count(*),'enabled',count(*) FILTER (WHERE f.enabled),'healthy',count(*) FILTER (WHERE f.enabled AND f.last_error IS NULL),'failing',count(*) FILTER (WHERE f.enabled AND f.last_error IS NOT NULL),'paused',count(*) FILTER (WHERE NOT f.enabled)) FROM community_artists a JOIN feeds f ON f.id=a.feed_id WHERE a.community_id=$1",
+    )
+    .bind(server)
+    .fetch_one(&s.pool)
+    .await?;
+    let failing: Value = sqlx::query_scalar(
+        "SELECT coalesce(jsonb_agg(item), '[]'::jsonb) FROM (SELECT jsonb_build_object('artist_id',a.id,'name',a.name,'source',f.source,'category',a.category,'enabled',f.enabled,'consecutive_errors',f.consecutive_errors,'last_error',f.last_error,'last_checked_at',f.last_checked_at,'next_check_at',f.next_check_at) AS item FROM community_artists a JOIN feeds f ON f.id=a.feed_id WHERE a.community_id=$1 AND f.enabled AND f.last_error IS NOT NULL ORDER BY f.consecutive_errors DESC,f.last_checked_at DESC NULLS LAST LIMIT 100) sub",
+    )
+    .bind(server)
+    .fetch_one(&s.pool)
+    .await?;
+    Ok(Json(json!({"summary": summary, "failing": failing})))
+}
+
+pub async fn retry_failed_feeds(
+    State(s): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(server): Path<Uuid>,
+) -> Result<Json<Value>> {
+    service::authorize(&s, &user, server, true).await?;
+    let queued = sqlx::query(
+        "UPDATE feeds SET next_check_at=now() WHERE enabled AND last_error IS NOT NULL AND id IN (SELECT feed_id FROM community_artists WHERE community_id=$1)",
+    )
+    .bind(server)
+    .execute(&s.pool)
+    .await?
+    .rows_affected();
+    s.wake.notify_one();
+    Ok(Json(json!({"queued": queued})))
 }

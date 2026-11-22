@@ -20,6 +20,7 @@ const serverAutomation = readFileSync(new URL("../backend/migrations/0008_server
 const taxonomy = readFileSync(new URL("../backend/migrations/0009_categories_and_tags.sql",import.meta.url),"utf8");
 const automaticTags = readFileSync(new URL("../backend/migrations/0010_automatic_tagging.sql",import.meta.url),"utf8");
 const webhookFilters = readFileSync(new URL("../backend/migrations/0011_webhook_filters.sql",import.meta.url),"utf8");
+const performanceAndBackoff = readFileSync(new URL("../backend/migrations/0012_performance_and_backoff.sql",import.meta.url),"utf8");
 for (const configured of [false, true]) {
   const sql = `BEGIN;
     CREATE SCHEMA migration_fixture;
@@ -39,9 +40,12 @@ for (const configured of [false, true]) {
     ${taxonomy}
     ${automaticTags}
     ${webhookFilters}
+    ${performanceAndBackoff}
     DO $$ BEGIN
       IF (SELECT count(*) FROM webhooks) <> ${configured ? 1 : 0} THEN RAISE EXCEPTION 'Destination migration failed'; END IF;
       IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='migration_fixture' AND table_name='webhooks' AND column_name IN ('category_filters','include_tags','exclude_tags') GROUP BY table_name HAVING count(*)=3) THEN RAISE EXCEPTION 'Webhook filter columns missing'; END IF;
+      IF NOT EXISTS(SELECT 1 FROM information_schema.columns WHERE table_schema='migration_fixture' AND table_name='feeds' AND column_name='consecutive_errors') THEN RAISE EXCEPTION 'Feed consecutive_errors column missing'; END IF;
+      IF NOT EXISTS(SELECT 1 FROM pg_indexes WHERE schemaname='migration_fixture' AND indexname='community_post_tags_tags_gin_idx') THEN RAISE EXCEPTION 'GIN tag index missing'; END IF;
       IF NOT EXISTS(SELECT 1 FROM jobs WHERE status='failed' AND attempts=8 AND last_error='Previous error' AND webhook_id IS ${configured ? 'NOT ' : ''}NULL) THEN RAISE EXCEPTION 'Job state was lost'; END IF;
       IF (SELECT count(*) FROM feeds) <> 1 OR (SELECT count(*) FROM entries) <> 1 THEN RAISE EXCEPTION 'Feed data was lost'; END IF;
     END $$;

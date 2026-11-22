@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use reqwest::{Client, Response, header::HeaderMap};
 use std::{
     net::{IpAddr, SocketAddr},
+    sync::{Arc, OnceLock},
     time::Duration,
 };
 use url::Url;
@@ -52,42 +53,105 @@ fn public_ip(ip: IpAddr) -> bool {
         }
     }
 }
-pub async fn get(raw: &str, headers: HeaderMap, allow_private: bool) -> Result<Response> {
-    let mut url = web_url(raw)?;
-    for _ in 0..5 {
-        let host = url
-            .host_str()
-            .context("Missing host")?
-            .trim_matches(['[', ']']);
-        let port = url.port_or_known_default().unwrap_or(443);
-        let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host, port))
-            .await
-            .context("Unable to resolve the host")?
-            .collect();
-        let allowed = allow_private
-            && std::env::var("ALLOW_PRIVATE_FEED_HOSTS")
-                .unwrap_or_default()
-                .split(',')
-                .any(|h| !h.is_empty() && h.trim() == host);
-        if addresses.is_empty() || (!allowed && addresses.iter().any(|a| !public_ip(a.ip()))) {
+
+fn is_allowed_private_host(host: &str) -> bool {
+    std::env::var("ALLOW_PRIVATE_FEED_HOSTS")
+        .unwrap_or_default()
+        .split(',')
+        .any(|h| !h.is_empty() && h.trim() == host)
+}
+
+fn validate_host_literal(url: &Url, allow_private: bool, is_webhook: bool) -> Result<()> {
+    let host = url
+        .host_str()
+        .context("Missing host")?
+        .trim_matches(['[', ']']);
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        let allowed = allow_private && is_allowed_private_host(host);
+        if !public_ip(ip) && !allowed {
+            if is_webhook {
+                bail!("Webhook destination must use a public address");
+            }
             bail!(
                 "Private or reserved host blocked; configure ALLOW_PRIVATE_FEED_HOSTS for a local RSSHub"
             );
         }
-        let client = Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(Duration::from_secs(90))
-            .connect_timeout(Duration::from_secs(10))
-            .user_agent("LewdArchive/0.1 (+RSS reader)")
-            .resolve_to_addrs(host, &addresses)
-            .build()?;
-        let response = client
+    }
+    Ok(())
+}
+
+/// Custom DNS resolver enforcing anti-SSRF IP checks on every connection inside pooled clients.
+struct SafeResolver {
+    allow_private: bool,
+}
+
+impl reqwest::dns::Resolve for SafeResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().trim_matches(['[', ']']).to_owned();
+        let allow_private = self.allow_private;
+        Box::pin(async move {
+            let addresses: Vec<SocketAddr> = tokio::net::lookup_host((host.as_str(), 0))
+                .await
+                .map_err(|_| std::io::Error::other("Unable to resolve the host"))?
+                .collect();
+            let allowed = allow_private && is_allowed_private_host(&host);
+            if addresses.is_empty() {
+                return Err(
+                    Box::new(std::io::Error::other("Unable to resolve the host"))
+                        as Box<dyn std::error::Error + Send + Sync>,
+                );
+            }
+            if !allowed && addresses.iter().any(|a| !public_ip(a.ip())) {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::PermissionDenied,
+                    "Private or reserved host blocked; configure ALLOW_PRIVATE_FEED_HOSTS for a local RSSHub",
+                ))
+                    as Box<dyn std::error::Error + Send + Sync>);
+            }
+            Ok(Box::new(addresses.into_iter()) as reqwest::dns::Addrs)
+        })
+    }
+}
+
+fn build_client(allow_private: bool, timeout_secs: u64, max_idle: usize, ua: &str) -> Client {
+    Client::builder()
+        .dns_resolver(Arc::new(SafeResolver { allow_private }))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(10))
+        .pool_idle_timeout(Duration::from_secs(90))
+        .pool_max_idle_per_host(max_idle)
+        .user_agent(ua)
+        .build()
+        .expect("HTTP client configuration must be valid")
+}
+
+fn pooled_feed_client(allow_private: bool) -> &'static Client {
+    static PUBLIC: OnceLock<Client> = OnceLock::new();
+    static PRIVATE: OnceLock<Client> = OnceLock::new();
+    if allow_private {
+        PRIVATE.get_or_init(|| build_client(true, 90, 8, "LewdArchive/0.1 (+RSS reader)"))
+    } else {
+        PUBLIC.get_or_init(|| build_client(false, 90, 8, "LewdArchive/0.1 (+RSS reader)"))
+    }
+}
+
+fn pooled_webhook_client() -> &'static Client {
+    static WEBHOOK: OnceLock<Client> = OnceLock::new();
+    WEBHOOK.get_or_init(|| build_client(false, 30, 4, "LewdArchive/0.1 (+community webhook)"))
+}
+
+pub async fn get(raw: &str, headers: HeaderMap, allow_private: bool) -> Result<Response> {
+    let mut url = web_url(raw)?;
+    for _ in 0..5 {
+        validate_host_literal(&url, allow_private, false)?;
+        let response = pooled_feed_client(allow_private)
             .get(url.clone())
             .headers(headers.clone())
             .send()
             .await
-            .map_err(|e| e.without_url())?;
+            .map_err(|e| anyhow::anyhow!(e.without_url()))?;
         if response.status().is_redirection() && response.status().as_u16() != 304 {
             let location = response
                 .headers()
@@ -114,31 +178,13 @@ pub async fn limited_body(mut response: Response, limit: usize) -> Result<Vec<u8
     }
     Ok(body)
 }
-/// Resolve and pin a public destination before a server administrator can send a webhook.
+/// Validate HTTPS + public literal hosts and return the shared DNS-guarded webhook pool client.
 pub async fn public_webhook_client(url: &Url) -> Result<Client> {
     if url.scheme() != "https" {
         bail!("Community webhooks require HTTPS");
     }
-    let host = url
-        .host_str()
-        .context("Missing webhook host")?
-        .trim_matches(['[', ']']);
-    let addresses: Vec<SocketAddr> =
-        tokio::net::lookup_host((host, url.port_or_known_default().unwrap_or(443)))
-            .await
-            .context("Unable to resolve webhook host")?
-            .collect();
-    if addresses.is_empty() || addresses.iter().any(|a| !public_ip(a.ip())) {
-        bail!("Webhook destination must use a public address");
-    }
-    Ok(Client::builder()
-        .no_proxy()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(30))
-        .connect_timeout(Duration::from_secs(10))
-        .resolve_to_addrs(host, &addresses)
-        .user_agent("LewdArchive/0.1 (+community webhook)")
-        .build()?)
+    validate_host_literal(url, false, true)?;
+    Ok(pooled_webhook_client().clone())
 }
 pub fn webhook(raw: &str) -> Result<Url> {
     let url = web_url(raw)?;
@@ -164,6 +210,16 @@ mod tests {
         );
         assert!(
             public_webhook_client(&Url::parse("https://[::1]/webhook").unwrap())
+                .await
+                .is_err()
+        );
+        assert!(
+            get("http://127.0.0.1:9/rss", HeaderMap::new(), false)
+                .await
+                .is_err()
+        );
+        assert!(
+            get("http://169.254.169.254/latest", HeaderMap::new(), false)
                 .await
                 .is_err()
         );

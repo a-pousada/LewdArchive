@@ -15,25 +15,34 @@ struct Job {
 
 pub async fn run(s: AppState) {
     loop {
-        if let Err(error) = tick(&s).await {
-            tracing::error!(%error, "AI tagging cycle failed");
+        match tick(&s).await {
+            Ok(true) => tokio::time::sleep(std::time::Duration::from_millis(50)).await,
+            Ok(false) => {
+                tokio::select! {
+                    _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                    _ = s.wake.notified() => {}
+                }
+            }
+            Err(error) => {
+                tracing::error!(%error, "AI tagging cycle failed");
+                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            }
         }
-        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 }
 
-pub(super) async fn tick(s: &AppState) -> Result<()> {
+pub(super) async fn tick(s: &AppState) -> Result<bool> {
     let Some(tagger) = &s.tagger else {
-        return Ok(());
+        return Ok(false);
     };
     sqlx::query("UPDATE community_tag_jobs SET status=CASE WHEN attempts>=3 THEN 'failed' ELSE 'pending' END,last_error='AI worker was interrupted',locked_at=NULL WHERE status='processing' AND locked_at<now()-interval '5 minutes'").execute(&s.pool).await?;
     let job: Option<Job> = sqlx::query_as("UPDATE community_tag_jobs SET status='processing',locked_at=now(),attempts=attempts+1 WHERE (community_id,entry_id)=(SELECT j.community_id,j.entry_id FROM community_tag_jobs j JOIN communities c ON c.id=j.community_id WHERE j.status='pending' AND j.next_attempt_at<=now() AND c.ai_tags_enabled AND c.enabled ORDER BY j.next_attempt_at FOR UPDATE OF j SKIP LOCKED LIMIT 1) RETURNING community_id,entry_id,artist_id,attempts").fetch_optional(&s.pool).await?;
     let Some(job) = job else {
-        return Ok(());
+        return Ok(false);
     };
     let row: Option<(Value,)> = sqlx::query_as("SELECT e.media FROM entries e JOIN community_artists a ON a.feed_id=e.feed_id AND a.community_id=$1 WHERE e.id=$2").bind(job.community_id).bind(job.entry_id).fetch_optional(&s.pool).await?;
     let Some((media,)) = row else {
-        return Ok(());
+        return Ok(true);
     }; // Cascading deletion removes the job too.
     match tagger.suggest(&media).await {
         Ok(tags) => {
@@ -45,7 +54,7 @@ pub(super) async fn tick(s: &AppState) -> Result<()> {
         }
     }
     s.wake.notify_one();
-    Ok(())
+    Ok(true)
 }
 
 /// A manual edit (including an intentional empty tag list) always wins the race.

@@ -1535,6 +1535,152 @@ async fn server_and_user_isolation() {
         .await
         .unwrap();
 
+    // AI tag jobs, controlled backfill, retry/cancel, feed health, and SQL artist pagination.
+    let ai_jobs_path = format!("/servers/{}/ai/jobs", a.id);
+    let backfill_path = format!("/servers/{}/ai/backfill", a.id);
+    let retry_ai_path = format!("/servers/{}/ai/jobs/retry", a.id);
+    let cancel_ai_path = format!("/servers/{}/ai/jobs/cancel-pending", a.id);
+    let feed_health_path = format!("/servers/{}/feeds/health", a.id);
+    let retry_feeds_path = format!("/servers/{}/feeds/retry-failed", a.id);
+
+    assert_eq!(
+        request(&app, &ai_jobs_path, "member", "GET", json!({}))
+            .await
+            .0,
+        403
+    );
+    let jobs_snap = request(&app, &ai_jobs_path, "manager", "GET", json!({})).await;
+    assert_eq!(jobs_snap.0, 200);
+    assert_eq!(jobs_snap.1["tagger_configured"], false);
+    assert_eq!(
+        request(&app, &backfill_path, "member", "POST", json!({"limit": 10}))
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        request(&app, &backfill_path, "manager", "POST", json!({"limit": 0}))
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        request(
+            &app,
+            &backfill_path,
+            "manager",
+            "POST",
+            json!({"limit": 1001})
+        )
+        .await
+        .0,
+        400
+    );
+    assert_eq!(
+        request(
+            &app,
+            &backfill_path,
+            "manager",
+            "POST",
+            json!({"limit": 10})
+        )
+        .await
+        .0,
+        503
+    );
+
+    let ai_app = super::routes(ai_state.clone()).with_state(ai_state.clone());
+    let bf_entry = Uuid::new_v4();
+    sqlx::query("INSERT INTO entries(id,feed_id,guid,title,author,url,media,published_at) VALUES($1,$2,$1::text,'Untagged image post','Aoi','https://example.com/bf',$3,now())")
+        .bind(bf_entry)
+        .bind(feed_id)
+        .bind(json!([{"kind":"image","url":"https://fixtures.invalid/image.png"}]))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let bf_res = request(
+        &ai_app,
+        &backfill_path,
+        "manager",
+        "POST",
+        json!({"limit": 5}),
+    )
+    .await;
+    assert_eq!(bf_res.0, 200);
+    assert_eq!(bf_res.1["queued"], 1);
+    let jobs_after = request(&ai_app, &ai_jobs_path, "manager", "GET", json!({})).await;
+    assert_eq!(jobs_after.1["counts"]["pending"], 1);
+    assert_eq!(
+        request(&app, &cancel_ai_path, "member", "POST", json!({}))
+            .await
+            .0,
+        403
+    );
+    let cancel_res = request(&app, &cancel_ai_path, "manager", "POST", json!({})).await;
+    assert_eq!(cancel_res.0, 200);
+    assert_eq!(cancel_res.1["cancelled"], 1);
+    sqlx::query("INSERT INTO community_tag_jobs(community_id,entry_id,artist_id,status,attempts,last_error) VALUES($1,$2,$3,'failed',3,'Provider error')")
+        .bind(a.id)
+        .bind(bf_entry)
+        .bind(artist.parse::<Uuid>().unwrap())
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(&app, &retry_ai_path, "member", "POST", json!({}))
+            .await
+            .0,
+        403
+    );
+    let retry_ai_res = request(
+        &app,
+        &retry_ai_path,
+        "manager",
+        "POST",
+        json!({"entry_id": bf_entry}),
+    )
+    .await;
+    assert_eq!(retry_ai_res.0, 200);
+    assert_eq!(retry_ai_res.1["retried"], 1);
+    sqlx::query("DELETE FROM entries WHERE id=$1")
+        .bind(bf_entry)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    assert_eq!(
+        request(&app, &feed_health_path, "member", "GET", json!({}))
+            .await
+            .0,
+        403
+    );
+    let health = request(&app, &feed_health_path, "manager", "GET", json!({})).await;
+    assert_eq!(health.0, 200);
+    assert_eq!(health.1["summary"]["total"], 2);
+    assert_eq!(
+        request(&app, &retry_feeds_path, "member", "POST", json!({}))
+            .await
+            .0,
+        403
+    );
+    assert_eq!(
+        request(&app, &retry_feeds_path, "manager", "POST", json!({}))
+            .await
+            .0,
+        200
+    );
+    let paged_artists = request(
+        &app,
+        &format!("/servers/{}/artists?limit=1&page=1", a.id),
+        "member",
+        "GET",
+        json!({}),
+    )
+    .await;
+    assert_eq!(paged_artists.0, 200);
+    assert_eq!(paged_artists.1.as_array().unwrap().len(), 1);
+    assert!(paged_artists.1[0].get("consecutive_errors").is_some());
+
     // A removed artist cannot retain a publicly counted preference or tags on re-add.
     assert_eq!(
         request(&app, &artist_path, "manager", "DELETE", json!({}))

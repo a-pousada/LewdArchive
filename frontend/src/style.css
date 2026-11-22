@@ -2726,6 +2726,78 @@ td .button {
   cursor: pointer;
   flex-shrink: 0;
 }
+.obs-panel {
+  margin-bottom: 20px;
+  display: grid;
+  gap: 14px;
+}
+.obs-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+.obs-header h2 {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 4px;
+}
+.obs-header p {
+  margin: 0;
+}
+.obs-stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 10px;
+}
+.obs-stat {
+  padding: 12px;
+  border: 1px solid #303039;
+  border-radius: 10px;
+  background: #15151b;
+}
+.obs-stat strong {
+  display: block;
+  font-size: 18px;
+  color: #ece7f0;
+}
+.obs-stat span {
+  font-size: 12px;
+  color: var(--muted);
+}
+.obs-controls {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+.obs-controls label {
+  margin: 0;
+}
+.obs-list {
+  display: grid;
+  border-top: 1px solid #303039;
+}
+.obs-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 14px 0;
+  border-bottom: 1px solid #303039;
+  font-size: 13px;
+}
+.obs-row > div {
+  flex: 1;
+  min-width: 0;
+}
+.obs-row small {
+  display: block;
+  color: var(--muted);
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
 @media (max-width: 640px) {
   .category-routes,
   .category-route-form {

@@ -17,6 +17,12 @@ pub struct Feed {
     pub etag: Option<String>,
     #[serde(skip)]
     pub last_modified: Option<String>,
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub poll_minutes: i32,
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub consecutive_errors: i32,
 }
 #[derive(Debug, Serialize, FromRow)]
 pub struct Entry {
