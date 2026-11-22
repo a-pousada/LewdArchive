@@ -100,3 +100,43 @@ jobs:
             .test-runtime/*.log
             .test-runtime/*.png
             frontend/test-results/
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Lint Docker Compose configurations
+        env:
+          API_TOKEN: ci-only-test-key-000000000000000000000000
+          POSTGRES_PASSWORD: ci-only-database-password
+        run: |
+          docker compose --profile ai config --quiet
+          docker compose -f compose.yaml -f compose.dev.yaml config --quiet
+      - name: Lint Dockerfiles
+        run: |
+          docker buildx build --check .
+          docker buildx build --check ./tagger
+      - name: Build app Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          load: true
+          tags: lewdarchive:ci
+          cache-from: type=gha,scope=app
+          cache-to: type=gha,scope=app,mode=max
+      - name: Verify app Docker image
+        run: docker run --rm --entrypoint sh lewdarchive:ci -ec 'test -x /usr/local/bin/lewdarchive && test -f /app/frontend/dist/index.html'
+      - name: Build tagger Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: ./tagger
+          file: ./tagger/Dockerfile
+          push: false
+          load: true
+          tags: lewdarchive-tagger:ci
+          cache-from: type=gha,scope=tagger
+          cache-to: type=gha,scope=tagger,mode=max
+      - name: Verify tagger Docker image
+        run: docker run --rm --entrypoint python lewdarchive-tagger:ci -c "import numpy, onnxruntime, PIL"
