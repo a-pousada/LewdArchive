@@ -106,10 +106,35 @@ pub async fn untrack(s: &AppState, server: Uuid, artist: Uuid) -> Result<()> {
     }
     Ok(())
 }
-pub async fn artists(s: &AppState, server: Uuid, user: Uuid, favorites: bool) -> Result<Value> {
-    let rows:Vec<Value>=sqlx::query_scalar("SELECT jsonb_build_object('id',a.id,'feed_id',a.feed_id,'name',a.name,'avatar_url',a.avatar_url,'official_links',a.official_links,'url',f.url,'source',f.source,'enabled',a.enabled,'category',a.category,'last_error',f.last_error,'favorite',coalesce(p.favorite,false),'notify',coalesce(p.notify,false)) FROM community_artists a JOIN feeds f ON f.id=a.feed_id LEFT JOIN artist_preferences p ON p.artist_id=a.id AND p.user_id=$2 WHERE a.community_id=$1 AND (NOT $3 OR p.favorite) ORDER BY lower(a.name),a.id")
-        .bind(server).bind(user).bind(favorites).fetch_all(&s.pool).await?;
-    Ok(json!(rows))
+#[derive(serde::Deserialize, Default)]
+pub struct ArtistFilter {
+    #[serde(default)]
+    pub favorites: bool,
+    pub category: Option<String>,
+    #[serde(default)]
+    pub q: String,
+    #[serde(default)]
+    pub page: i64,
+    #[serde(default)]
+    pub limit: i64,
+}
+pub async fn artists(s: &AppState, server: Uuid, user: Uuid, q: &ArtistFilter) -> Result<Value> {
+    let limit = (q.limit > 0).then(|| q.limit.clamp(1, 500));
+    let offset = limit.map_or(0, |lim| (q.page.max(1) - 1).saturating_mul(lim));
+    let search = q.q.trim().to_lowercase();
+    let rows: Value = sqlx::query_scalar(
+        "SELECT coalesce(jsonb_agg(row_obj), '[]'::jsonb) FROM (SELECT jsonb_build_object('id',a.id,'feed_id',a.feed_id,'name',a.name,'avatar_url',a.avatar_url,'official_links',a.official_links,'url',f.url,'source',f.source,'enabled',a.enabled,'category',a.category,'last_error',f.last_error,'consecutive_errors',f.consecutive_errors,'last_checked_at',f.last_checked_at,'next_check_at',f.next_check_at,'favorite',coalesce(p.favorite,false),'notify',coalesce(p.notify,false)) AS row_obj FROM community_artists a JOIN feeds f ON f.id=a.feed_id LEFT JOIN artist_preferences p ON p.artist_id=a.id AND p.user_id=$2 WHERE a.community_id=$1 AND (NOT $3 OR p.favorite) AND ($4::text IS NULL OR a.category=$4) AND ($5='' OR strpos(lower(a.name),$5)>0 OR strpos(lower(f.source),$5)>0) ORDER BY lower(a.name),a.id LIMIT $6 OFFSET $7) sub",
+    )
+    .bind(server)
+    .bind(user)
+    .bind(q.favorites)
+    .bind(&q.category)
+    .bind(search)
+    .bind(limit)
+    .bind(offset)
+    .fetch_one(&s.pool)
+    .await?;
+    Ok(rows)
 }
 #[derive(serde::Deserialize, Default)]
 pub struct PostFilter {
@@ -132,8 +157,8 @@ pub async fn posts(
 ) -> Result<Value> {
     let page = q.page.clamp(1, 100000);
     let limit = limit.clamp(1, 24);
-    let filter = " FROM entries e JOIN community_artists a ON a.feed_id=e.feed_id AND a.community_id=$1 LEFT JOIN post_preferences p ON p.entry_id=e.id AND p.community_id=$1 AND p.user_id=$2 WHERE (NOT $3 OR p.favorite) AND (NOT $4 OR p.liked) AND ($5::text IS NULL OR a.category=$5) AND ($6='' OR EXISTS(SELECT 1 FROM community_post_tags t WHERE t.community_id=$1 AND t.entry_id=e.id AND $6=ANY(t.tags)))";
-    let rows:Vec<Value>=sqlx::query_scalar(&format!("SELECT jsonb_build_object('id',e.id,'artist_id',a.id,'feed_id',e.feed_id,'title',e.title,'author',e.author,'url',e.url,'summary',e.summary,'media',e.media,'published_at',e.published_at,'feed_name',a.name,'category',a.category,'tags_source',(SELECT t.source FROM community_post_tags t WHERE t.community_id=$1 AND t.entry_id=e.id),'tags',coalesce((SELECT t.tags FROM community_post_tags t WHERE t.community_id=$1 AND t.entry_id=e.id),'{{}}'::text[]),'favorite',coalesce(p.favorite,false),'liked',coalesce(p.liked,false),'likes',(SELECT count(*) FROM post_preferences l WHERE l.community_id=$1 AND l.entry_id=e.id AND l.liked)){filter} ORDER BY e.published_at DESC,e.id DESC LIMIT $8 OFFSET $7"))
+    let filter = " FROM entries e JOIN community_artists a ON a.feed_id=e.feed_id AND a.community_id=$1 LEFT JOIN post_preferences p ON p.entry_id=e.id AND p.community_id=$1 AND p.user_id=$2 LEFT JOIN community_post_tags t ON t.community_id=$1 AND t.entry_id=e.id WHERE (NOT $3 OR p.favorite) AND (NOT $4 OR p.liked) AND ($5::text IS NULL OR a.category=$5) AND ($6='' OR t.tags @> ARRAY[$6::text])";
+    let rows:Vec<Value>=sqlx::query_scalar(&format!("SELECT jsonb_build_object('id',e.id,'artist_id',a.id,'feed_id',e.feed_id,'title',e.title,'author',e.author,'url',e.url,'summary',e.summary,'media',e.media,'published_at',e.published_at,'feed_name',a.name,'category',a.category,'tags_source',t.source,'tags',coalesce(t.tags,'{{}}'::text[]),'favorite',coalesce(p.favorite,false),'liked',coalesce(p.liked,false),'likes',(SELECT count(*) FROM post_preferences l WHERE l.community_id=$1 AND l.entry_id=e.id AND l.liked)){filter} ORDER BY e.published_at DESC,e.id DESC LIMIT $8 OFFSET $7"))
         .bind(server).bind(user).bind(q.favorites).bind(q.liked).bind(&q.category).bind(q.tag.trim().to_lowercase()).bind((page-1)*limit).bind(limit).fetch_all(&s.pool).await?;
     let total: i64 = sqlx::query_scalar(&format!("SELECT count(*){filter}"))
         .bind(server)

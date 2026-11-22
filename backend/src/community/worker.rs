@@ -36,14 +36,22 @@ pub async fn enqueue(
     Ok(())
 }
 pub async fn run(s: AppState) {
+    let mut next_cleanup = tokio::time::Instant::now();
     loop {
+        let now = tokio::time::Instant::now();
+        if now >= next_cleanup {
+            if let Err(e) = cleanup(&s).await {
+                tracing::error!(error=%e,"community session cleanup failed");
+            }
+            next_cleanup = now + Duration::from_secs(300);
+        }
         if let Err(e) = tick(&s).await {
             tracing::error!(error=%e,"community worker cycle failed");
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
 }
-async fn tick(s: &AppState) -> Result<()> {
+async fn cleanup(s: &AppState) -> Result<()> {
     sqlx::query("DELETE FROM oauth_states WHERE expires_at<now()")
         .execute(&s.pool)
         .await?;
@@ -53,6 +61,9 @@ async fn tick(s: &AppState) -> Result<()> {
     sqlx::query("DELETE FROM interaction_jobs WHERE expires_at<now()")
         .execute(&s.pool)
         .await?;
+    Ok(())
+}
+async fn tick(s: &AppState) -> Result<()> {
     if s.discord.is_none() {
         return Ok(());
     }

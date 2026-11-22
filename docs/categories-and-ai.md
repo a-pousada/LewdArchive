@@ -54,7 +54,7 @@ For installations migrating from the earlier implementation, replace `AI_OLLAMA_
 
 ## Automatic tags
 
-After the operator configures a model, a server manager may enable **Automatically tag new posts** in Server settings. It is off by default and applies only to newly discovered posts after a feed's initial import. Historical posts remain silent and can use manual previews.
+After the operator configures a model, a server manager may enable **Automatically tag new posts** in Server settings. It is off by default and applies only to newly discovered posts after a feed's initial import. Historical posts remain silent and can use manual previews or controlled batches (**50–1000 posts**) launched from **Delivery activity → AI tagging & backfill** (where failed jobs can also be retried or pending batches cancelled). **Delivery activity → Feed health** surfaces failing feeds, backoff schedules and retry actions.
 
 Automatic classification analyzes images through the same local service as previews. It runs in a persistent queue separate from polling and downloads, with up to three attempts and stale-job recovery. Notifications wait for tags while a job is active, for at most five minutes from discovery. After failure, timeout of this waiting window, disabling automatic tags, or disabling the provider, normal delivery can proceed without tags. A later AI result does not edit already-sent Discord messages.
 

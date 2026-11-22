@@ -346,7 +346,11 @@ pub async fn process(s: &AppState, payload: &Value) -> Result<Value> {
             }))
         }
         "artists" | "favorites" if name == "artists" || text(options, "kind") == "artists" => {
-            let artists = service::artists(s, server.id, user.id, name == "favorites").await?;
+            let filter = service::ArtistFilter {
+                favorites: name == "favorites",
+                ..Default::default()
+            };
+            let artists = service::artists(s, server.id, user.id, &filter).await?;
             let page = option(options, "page")
                 .and_then(Value::as_u64)
                 .unwrap_or(1)

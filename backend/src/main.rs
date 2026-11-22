@@ -145,6 +145,7 @@ async fn main() -> anyhow::Result<()> {
         .with_state(state.clone());
     let tag_worker = tokio::spawn(community::tag_worker::run(state.clone()));
     let community_worker = tokio::spawn(community::worker::run(state.clone()));
+    let download_worker = tokio::spawn(worker::run_downloads(state.clone()));
     let worker = tokio::spawn(worker::run(state));
     let address = std::env::var("BIND_ADDRESS").unwrap_or("0.0.0.0:8080".into());
     let listener = tokio::net::TcpListener::bind(&address).await?;
@@ -155,6 +156,7 @@ async fn main() -> anyhow::Result<()> {
         })
         .await?;
     worker.abort();
+    download_worker.abort();
     community_worker.abort();
     tag_worker.abort();
     Ok(())

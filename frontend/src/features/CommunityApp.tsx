@@ -4,6 +4,8 @@ import PostFiles from './PostFiles';
 import PostComments from './PostComments';
 import WebhookManager from './WebhookManager';
 import WebhookActivity from './WebhookActivity';
+import FeedHealth from './FeedHealth';
+import AiTagActivity from './AiTagActivity';
 import Trending from './Trending';
 import ArtistProfile from './ArtistProfile';
 import BulkCategorize from './BulkCategorize';
@@ -741,6 +743,8 @@ function Library({ serverId }: { serverId: string }) {
       )}
       {view === 'settings' && manager && <Categories serverId={serverId} />}
       {view === 'settings' && manager && <WebhookManager serverId={serverId} />}
+      {view === 'activity' && manager && <FeedHealth serverId={serverId} />}
+      {view === 'activity' && manager && <AiTagActivity serverId={serverId} />}
       {view === 'activity' && manager && <WebhookActivity serverId={serverId} />}
       {view === 'activity' && manager && (
         <div className="community-activity">

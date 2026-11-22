@@ -136,6 +136,18 @@ pub fn routes(state: crate::AppState) -> axum::Router<crate::AppState> {
             get(categories::list).put(categories::save),
         )
         .route("/servers/{server}/ai", get(tags::config))
+        .route("/servers/{server}/ai/jobs", get(tags::jobs))
+        .route("/servers/{server}/ai/backfill", post(tags::backfill))
+        .route("/servers/{server}/ai/jobs/retry", post(tags::retry_jobs))
+        .route(
+            "/servers/{server}/ai/jobs/cancel-pending",
+            post(tags::cancel_pending),
+        )
+        .route("/servers/{server}/feeds/health", get(api::feed_health))
+        .route(
+            "/servers/{server}/feeds/retry-failed",
+            post(api::retry_failed_feeds),
+        )
         .route(
             "/servers/{server}/posts/{post}/tags",
             axum::routing::put(tags::save),

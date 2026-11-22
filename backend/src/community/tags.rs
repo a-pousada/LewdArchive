@@ -138,6 +138,122 @@ pub async fn decorate(
     Ok(())
 }
 
+pub async fn jobs(
+    State(s): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(server): Path<Uuid>,
+) -> Result<Json<Value>> {
+    let (community, _) = service::authorize(&s, &user, server, true).await?;
+    let counts: Value = sqlx::query_scalar(
+        "SELECT jsonb_build_object('pending',count(*) FILTER (WHERE status='pending'),'processing',count(*) FILTER (WHERE status='processing'),'done',count(*) FILTER (WHERE status='done'),'failed',count(*) FILTER (WHERE status='failed')) FROM community_tag_jobs WHERE community_id=$1",
+    )
+    .bind(server)
+    .fetch_one(&s.pool)
+    .await?;
+    let untagged: i64 = sqlx::query_scalar(
+        "SELECT count(*) FROM entries e JOIN community_artists a ON a.feed_id=e.feed_id AND a.community_id=$1 LEFT JOIN community_post_tags t ON t.community_id=$1 AND t.entry_id=e.id LEFT JOIN community_tag_jobs j ON j.community_id=$1 AND j.entry_id=e.id WHERE t.entry_id IS NULL AND j.entry_id IS NULL AND EXISTS(SELECT 1 FROM jsonb_array_elements(e.media) m WHERE m->>'kind'='image')",
+    )
+    .bind(server)
+    .fetch_one(&s.pool)
+    .await?;
+    let recent: Value = sqlx::query_scalar(
+        "SELECT coalesce(jsonb_agg(item), '[]'::jsonb) FROM (SELECT jsonb_build_object('entry_id',j.entry_id,'title',e.title,'artist',a.name,'status',j.status,'attempts',j.attempts,'last_error',j.last_error,'created_at',j.created_at) AS item FROM community_tag_jobs j JOIN entries e ON e.id=j.entry_id JOIN community_artists a ON a.id=j.artist_id AND a.community_id=j.community_id WHERE j.community_id=$1 ORDER BY CASE j.status WHEN 'failed' THEN 0 WHEN 'processing' THEN 1 WHEN 'pending' THEN 2 ELSE 3 END,j.created_at DESC LIMIT 50) sub",
+    )
+    .bind(server)
+    .fetch_one(&s.pool)
+    .await?;
+    let mut summary = counts;
+    if let Some(obj) = summary.as_object_mut() {
+        obj.insert("untagged_with_images".into(), json!(untagged));
+    }
+    Ok(Json(json!({
+        "tagger_configured": s.tagger.is_some(),
+        "ai_tags_enabled": community.ai_tags_enabled,
+        "counts": summary,
+        "recent": recent,
+    })))
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BackfillInput {
+    pub limit: i64,
+}
+
+pub async fn backfill(
+    State(s): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(server): Path<Uuid>,
+    Json(i): Json<BackfillInput>,
+) -> Result<Json<Value>> {
+    let (community, _) = service::authorize(&s, &user, server, true).await?;
+    if !(1..=1000).contains(&i.limit) {
+        return Err(bad("Choose a batch size between 1 and 1000"));
+    }
+    if s.tagger.is_none() {
+        return Err(ApiError(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "AI tagging is not configured by the installation administrator".into(),
+        ));
+    }
+    if !community.ai_tags_enabled {
+        return Err(bad(
+            "Enable automatic AI tagging in Server settings before starting a backfill",
+        ));
+    }
+    let queued = sqlx::query(
+        "INSERT INTO community_tag_jobs(community_id,entry_id,artist_id) SELECT $1,e.id,a.id FROM entries e JOIN community_artists a ON a.feed_id=e.feed_id AND a.community_id=$1 LEFT JOIN community_post_tags t ON t.community_id=$1 AND t.entry_id=e.id LEFT JOIN community_tag_jobs j ON j.community_id=$1 AND j.entry_id=e.id WHERE t.entry_id IS NULL AND j.entry_id IS NULL AND EXISTS(SELECT 1 FROM jsonb_array_elements(e.media) m WHERE m->>'kind'='image') ORDER BY e.published_at DESC,e.id DESC LIMIT $2 ON CONFLICT DO NOTHING",
+    )
+    .bind(server)
+    .bind(i.limit)
+    .execute(&s.pool)
+    .await?
+    .rows_affected();
+    s.wake.notify_one();
+    Ok(Json(json!({"queued": queued})))
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct RetryTagJobsInput {
+    #[serde(default)]
+    pub entry_id: Option<Uuid>,
+}
+
+pub async fn retry_jobs(
+    State(s): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(server): Path<Uuid>,
+    Json(i): Json<RetryTagJobsInput>,
+) -> Result<Json<Value>> {
+    service::authorize(&s, &user, server, true).await?;
+    let retried = sqlx::query(
+        "UPDATE community_tag_jobs SET status='pending',attempts=0,next_attempt_at=now(),locked_at=NULL,last_error=NULL WHERE community_id=$1 AND status='failed' AND ($2::uuid IS NULL OR entry_id=$2)",
+    )
+    .bind(server)
+    .bind(i.entry_id)
+    .execute(&s.pool)
+    .await?
+    .rows_affected();
+    s.wake.notify_one();
+    Ok(Json(json!({"retried": retried})))
+}
+
+pub async fn cancel_pending(
+    State(s): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(server): Path<Uuid>,
+) -> Result<Json<Value>> {
+    service::authorize(&s, &user, server, true).await?;
+    let cancelled =
+        sqlx::query("DELETE FROM community_tag_jobs WHERE community_id=$1 AND status='pending'")
+            .bind(server)
+            .execute(&s.pool)
+            .await?
+            .rows_affected();
+    Ok(Json(json!({"cancelled": cancelled})))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
