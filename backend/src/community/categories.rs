@@ -72,3 +72,35 @@ pub async fn save(
     }
     Ok(Json(json!({"ok":true})))
 }
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BulkCategoryInput {
+    pub artist_ids: Vec<Uuid>,
+    pub category: String,
+}
+
+pub async fn bulk_assign(
+    State(s): State<AppState>,
+    Extension(user): Extension<User>,
+    Path(server): Path<Uuid>,
+    Json(i): Json<BulkCategoryInput>,
+) -> Result<Json<Value>> {
+    service::authorize(&s, &user, server, true).await?;
+    if i.artist_ids.is_empty() || i.artist_ids.len() > 500 {
+        return Err(bad("Select between 1 and 500 artists"));
+    }
+    let category = i.category.trim();
+    validate(category)?;
+    let updated = sqlx::query(
+        "UPDATE community_artists SET category=$3 WHERE community_id=$1 AND id = ANY($2)",
+    )
+    .bind(server)
+    .bind(&i.artist_ids)
+    .bind(category)
+    .execute(&s.pool)
+    .await?
+    .rows_affected();
+    s.wake.notify_one();
+    Ok(Json(json!({"updated": updated, "category": category})))
+}

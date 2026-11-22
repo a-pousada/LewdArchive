@@ -68,6 +68,10 @@ pub fn routes(state: crate::AppState) -> axum::Router<crate::AppState> {
             get(api::artists).post(api::track),
         )
         .route(
+            "/servers/{server}/artists/bulk-category",
+            post(categories::bulk_assign),
+        )
+        .route(
             "/servers/{server}/artists/{artist}",
             delete(api::untrack).patch(api::artist_preference),
         )
@@ -92,6 +96,7 @@ pub fn routes(state: crate::AppState) -> axum::Router<crate::AppState> {
             "/servers/{server}/webhooks/{id}",
             axum::routing::put(webhooks::update).delete(webhooks::delete),
         )
+        .route("/servers/{server}/webhooks/{id}/test", post(webhooks::test))
         .route(
             "/servers/{server}/webhook-deliveries",
             get(webhooks::deliveries),

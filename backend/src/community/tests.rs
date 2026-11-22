@@ -1354,6 +1354,187 @@ async fn server_and_user_isolation() {
         .await
         .unwrap();
 
+    // Bulk categorization respects permissions and server isolation.
+    let other_artist: Uuid =
+        sqlx::query_scalar("SELECT id FROM community_artists WHERE community_id=$1 LIMIT 1")
+            .bind(b.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let bulk_path = format!("/servers/{}/artists/bulk-category", a.id);
+    assert_eq!(
+        request(
+            &app,
+            &bulk_path,
+            "member",
+            "POST",
+            json!({"artist_ids": [artist], "category": "2D Illustration"})
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        request(
+            &app,
+            &bulk_path,
+            "manager",
+            "POST",
+            json!({"artist_ids": [], "category": "2D Illustration"})
+        )
+        .await
+        .0,
+        400
+    );
+    let bulk_res = request(
+        &app,
+        &bulk_path,
+        "manager",
+        "POST",
+        json!({"artist_ids": [artist, other_artist], "category": "2D Illustration"}),
+    )
+    .await;
+    assert_eq!(bulk_res.0, 200);
+    assert_eq!(bulk_res.1["updated"], 1);
+    let cat_a: String = sqlx::query_scalar("SELECT category FROM community_artists WHERE id=$1")
+        .bind(artist.parse::<Uuid>().unwrap())
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let cat_b: String = sqlx::query_scalar("SELECT category FROM community_artists WHERE id=$1")
+        .bind(other_artist)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(cat_a, "2D Illustration");
+    assert_ne!(cat_b, "2D Illustration");
+
+    // Multi-category and tag-filtered webhooks + manual replay & test authorization.
+    let multi_hook = Uuid::new_v4();
+    sqlx::query("INSERT INTO webhooks(id,community_id,name,url,category_filters,include_tags,exclude_tags) VALUES($1,$2,'Multi 2D/3D',$3,$4,$5,$6)")
+        .bind(multi_hook)
+        .bind(a.id)
+        .bind(format!("https://example.com/{multi_hook}"))
+        .bind(vec!["2D Illustration", "3D Art"])
+        .bind(vec!["digital_art"])
+        .bind(vec!["monochrome"])
+        .execute(&pool)
+        .await
+        .unwrap();
+    let multi_entry = Uuid::new_v4();
+    sqlx::query("INSERT INTO entries(id,feed_id,guid,title,author,url,published_at) VALUES($1,$2,$1::text,'Multi filter post','Aoi','https://example.com/multi',now())")
+        .bind(multi_entry)
+        .bind(feed_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut tx = pool.begin().await.unwrap();
+    worker::enqueue(&mut tx, feed_id, multi_entry)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    let queued_hooks: Vec<Uuid> =
+        sqlx::query_scalar("SELECT webhook_id FROM jobs WHERE entry_id=$1")
+            .bind(multi_entry)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    assert!(queued_hooks.contains(&hook_ids[0]));
+    assert!(!queued_hooks.contains(&hook_ids[1])); // Legacy 3D-only hook does not match 2D Illustration.
+    assert!(queued_hooks.contains(&multi_hook));
+
+    // send_post enforces include_tags and exclude_tags on saved post tags.
+    sqlx::query("UPDATE webhooks SET enabled=false WHERE id=$1")
+        .bind(hook_ids[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE jobs SET status='done' WHERE entry_id=$1 AND webhook_id=$2")
+        .bind(multi_entry)
+        .bind(multi_hook)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let replay_multi = format!("/servers/{}/posts/{multi_entry}/webhooks", a.id);
+    // Without matching include_tags, replay finds no matching webhook.
+    assert_eq!(
+        request(&app, &replay_multi, "manager", "POST", json!({}))
+            .await
+            .0,
+        400
+    );
+    // Matching include_tags succeeds.
+    assert_eq!(
+        request(
+            &app,
+            &format!("/servers/{}/posts/{multi_entry}/tags", a.id),
+            "manager",
+            "PUT",
+            json!({"tags": ["digital_art"]})
+        )
+        .await
+        .0,
+        200
+    );
+    let replay_ok = request(&app, &replay_multi, "manager", "POST", json!({})).await;
+    assert_eq!(replay_ok.0, 200);
+    assert_eq!(replay_ok.1["queued"], 1);
+    // Adding an excluded tag blocks delivery.
+    sqlx::query("UPDATE jobs SET status='skipped' WHERE entry_id=$1 AND webhook_id=$2")
+        .bind(multi_entry)
+        .bind(multi_hook)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        request(
+            &app,
+            &format!("/servers/{}/posts/{multi_entry}/tags", a.id),
+            "manager",
+            "PUT",
+            json!({"tags": ["digital_art", "monochrome"]})
+        )
+        .await
+        .0,
+        200
+    );
+    assert_eq!(
+        request(&app, &replay_multi, "manager", "POST", json!({}))
+            .await
+            .0,
+        400
+    );
+    // Test endpoint enforces manager permission and community scoping.
+    assert_eq!(
+        request(
+            &app,
+            &format!("/servers/{}/webhooks/{multi_hook}/test", a.id),
+            "member",
+            "POST",
+            json!({})
+        )
+        .await
+        .0,
+        403
+    );
+    assert_eq!(
+        request(
+            &app,
+            &format!("/servers/{}/webhooks/{multi_hook}/test", b.id),
+            "manager",
+            "POST",
+            json!({})
+        )
+        .await
+        .0,
+        404
+    );
+    sqlx::query("DELETE FROM entries WHERE id=$1")
+        .bind(multi_entry)
+        .execute(&pool)
+        .await
+        .unwrap();
+
     // A removed artist cannot retain a publicly counted preference or tags on re-add.
     assert_eq!(
         request(&app, &artist_path, "manager", "DELETE", json!({}))

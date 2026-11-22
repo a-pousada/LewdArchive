@@ -57,6 +57,9 @@ pub struct Job {
 #[derive(Serialize, FromRow)]
 pub struct Webhook {
     pub category_filter: Option<String>,
+    pub category_filters: Option<Vec<String>>,
+    pub include_tags: Vec<String>,
+    pub exclude_tags: Vec<String>,
     pub id: Uuid,
     pub name: String,
     #[serde(skip)]

@@ -2,7 +2,7 @@
 use super::{User, service};
 use crate::{
     AppState,
-    api::{Result, not_found},
+    api::{ApiError, Result, bad, not_found},
     models::Webhook,
     webhooks::{WebhookInput, validate_url},
 };
@@ -34,19 +34,32 @@ pub async fn create(
 ) -> Result<(StatusCode, Json<Webhook>)> {
     service::authorize(&s, &user, server, true).await?;
     i.validate()?;
+    let filters = i.validated_filters()?;
     if let Some(raw) = &i.url
         && !raw.trim().starts_with("https://")
     {
-        return Err(crate::api::bad(
-            "Community webhooks require a public HTTPS URL",
-        ));
+        return Err(bad("Community webhooks require a public HTTPS URL"));
     }
     let url = validate_url(
         i.url
             .as_deref()
-            .ok_or_else(|| crate::api::bad("Webhook URL is required"))?,
+            .ok_or_else(|| bad("Webhook URL is required"))?,
     )?;
-    let item=sqlx::query_as("INSERT INTO webhooks(id,community_id,name,url,username,avatar_url,embed_color,enabled,category_filter) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *").bind(Uuid::new_v4()).bind(server).bind(i.name.trim()).bind(url).bind(i.username.trim()).bind(i.avatar_url.trim()).bind(i.embed_color).bind(i.enabled).bind(i.category_filter.as_deref().map(str::trim)).fetch_one(&s.pool).await?;
+    let item = sqlx::query_as("INSERT INTO webhooks(id,community_id,name,url,username,avatar_url,embed_color,enabled,category_filter,category_filters,include_tags,exclude_tags) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *")
+        .bind(Uuid::new_v4())
+        .bind(server)
+        .bind(i.name.trim())
+        .bind(url)
+        .bind(i.username.trim())
+        .bind(i.avatar_url.trim())
+        .bind(i.embed_color)
+        .bind(i.enabled)
+        .bind(filters.category_filter)
+        .bind(filters.category_filters)
+        .bind(filters.include_tags)
+        .bind(filters.exclude_tags)
+        .fetch_one(&s.pool)
+        .await?;
     Ok((StatusCode::CREATED, Json(item)))
 }
 pub async fn update(
@@ -57,15 +70,29 @@ pub async fn update(
 ) -> Result<Json<Webhook>> {
     service::authorize(&s, &user, server, true).await?;
     i.validate()?;
+    let filters = i.validated_filters()?;
     if let Some(raw) = &i.url
         && !raw.trim().starts_with("https://")
     {
-        return Err(crate::api::bad(
-            "Community webhooks require a public HTTPS URL",
-        ));
+        return Err(bad("Community webhooks require a public HTTPS URL"));
     }
     let url = i.url.as_deref().map(validate_url).transpose()?;
-    let item=sqlx::query_as("UPDATE webhooks SET name=$3,url=coalesce($4,url),username=$5,avatar_url=$6,embed_color=$7,enabled=$8,category_filter=$9 WHERE id=$1 AND community_id=$2 RETURNING *").bind(id).bind(server).bind(i.name.trim()).bind(url).bind(i.username.trim()).bind(i.avatar_url.trim()).bind(i.embed_color).bind(i.enabled).bind(i.category_filter.as_deref().map(str::trim)).fetch_optional(&s.pool).await?.ok_or_else(not_found)?;
+    let item = sqlx::query_as("UPDATE webhooks SET name=$3,url=coalesce($4,url),username=$5,avatar_url=$6,embed_color=$7,enabled=$8,category_filter=$9,category_filters=$10,include_tags=$11,exclude_tags=$12 WHERE id=$1 AND community_id=$2 RETURNING *")
+        .bind(id)
+        .bind(server)
+        .bind(i.name.trim())
+        .bind(url)
+        .bind(i.username.trim())
+        .bind(i.avatar_url.trim())
+        .bind(i.embed_color)
+        .bind(i.enabled)
+        .bind(filters.category_filter)
+        .bind(filters.category_filters)
+        .bind(filters.include_tags)
+        .bind(filters.exclude_tags)
+        .fetch_optional(&s.pool)
+        .await?
+        .ok_or_else(not_found)?;
     s.wake.notify_one();
     Ok(Json(item))
 }
@@ -124,22 +151,46 @@ pub async fn send_post(
         return Err(crate::api::bad("Notifications are paused"));
     }
     let destinations: Vec<Uuid> = sqlx::query_scalar(
-        "SELECT w.id FROM webhooks w WHERE w.community_id=$1 AND w.enabled AND (w.category_filter IS NULL OR w.category_filter=(SELECT a.category FROM community_artists a JOIN entries e ON e.feed_id=a.feed_id WHERE a.community_id=$1 AND e.id=$2)) ORDER BY w.id FOR SHARE OF w",
+        "SELECT w.id FROM webhooks w JOIN community_artists a ON a.community_id=w.community_id JOIN entries e ON e.feed_id=a.feed_id LEFT JOIN community_post_tags t ON t.community_id=w.community_id AND t.entry_id=e.id WHERE w.community_id=$1 AND e.id=$2 AND w.enabled AND ((w.category_filters IS NULL AND w.category_filter IS NULL) OR a.category = ANY(coalesce(w.category_filters, ARRAY[w.category_filter]))) AND (cardinality(w.include_tags)=0 OR coalesce(t.tags,'{}'::text[]) && w.include_tags) AND (cardinality(w.exclude_tags)=0 OR NOT (coalesce(t.tags,'{}'::text[]) && w.exclude_tags)) ORDER BY w.id FOR SHARE OF w",
     )
     .bind(server)
     .bind(post)
     .fetch_all(&mut *tx)
     .await?;
     if destinations.is_empty() {
-        return Err(crate::api::bad(
-            "No enabled webhook matches this artist category",
+        return Err(bad(
+            "No enabled webhook matches this post's category and tags",
         ));
     }
     let mut queued = 0;
     for id in destinations {
-        queued+=sqlx::query("INSERT INTO jobs(id,entry_id,kind,webhook_id) VALUES($1,$2,'discord',$3) ON CONFLICT ON CONSTRAINT jobs_delivery_key DO UPDATE SET status='pending',attempts=0,next_attempt_at=now(),last_error=NULL,locked_at=NULL WHERE jobs.status IN('failed','done')").bind(Uuid::new_v4()).bind(post).bind(id).execute(&mut *tx).await?.rows_affected();
+        queued+=sqlx::query("INSERT INTO jobs(id,entry_id,kind,webhook_id) VALUES($1,$2,'discord',$3) ON CONFLICT ON CONSTRAINT jobs_delivery_key DO UPDATE SET status='pending',attempts=0,next_attempt_at=now(),last_error=NULL,locked_at=NULL WHERE jobs.status IN('failed','done','skipped')").bind(Uuid::new_v4()).bind(post).bind(id).execute(&mut *tx).await?.rows_affected();
     }
     tx.commit().await?;
     s.wake.notify_one();
     Ok(Json(json!({"queued":queued})))
+}
+
+/// Send an immediate test embed to one configured community webhook.
+pub async fn test(
+    State(s): State<AppState>,
+    Extension(user): Extension<User>,
+    Path((server, id)): Path<(Uuid, Uuid)>,
+) -> Result<Json<Value>> {
+    let (community, _) = service::authorize(&s, &user, server, true).await?;
+    let webhook: Webhook = sqlx::query_as("SELECT * FROM webhooks WHERE id=$1 AND community_id=$2")
+        .bind(id)
+        .bind(server)
+        .fetch_optional(&s.pool)
+        .await?
+        .ok_or_else(not_found)?;
+    let payload = crate::webhooks::test_payload(&webhook, &community.name);
+    tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        crate::worker::send_discord(&webhook, &payload),
+    )
+    .await
+    .map_err(|_| ApiError(StatusCode::GATEWAY_TIMEOUT, "Webhook test timed out".into()))?
+    .map_err(|e| ApiError(StatusCode::BAD_GATEWAY, e.to_string()))?;
+    Ok(Json(json!({"ok": true})))
 }

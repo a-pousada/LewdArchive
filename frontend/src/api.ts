@@ -50,6 +50,9 @@ export function bytes(n: number) {
 
 export interface Webhook {
   category_filter: string | null;
+  category_filters?: string[] | null;
+  include_tags?: string[];
+  exclude_tags?: string[];
   id: string;
   name: string;
   username: string;

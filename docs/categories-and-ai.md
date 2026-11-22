@@ -4,13 +4,13 @@ Artists have one category per server. Posts inherit their artist's category and 
 
 ## Library and routing
 
-Choose a category when tracking an artist, or use **Artists → Edit profile**. Suggested labels are **2D Illustration**, **3D Art**, **Photography** and **Mixed Media**. Custom labels, including your existing OPML categories, are supported. An empty category means Uncategorized. Labels are case-sensitive and trimmed; use the suggestions to keep spelling consistent.
+Choose a category when tracking an artist, use **Artists → Edit profile**, or select multiple artists at once via **Artists → Bulk categorize**. Suggested labels are **2D Illustration**, **3D Art**, **Photography** and **Mixed Media**. Custom labels, including your existing OPML categories, are supported. An empty category means Uncategorized. Labels are case-sensitive and trimmed; use the suggestions to keep spelling consistent.
 
 **Server settings → Category channels** maps an artist category to a Discord bot channel. Select a row to edit its destination, or enter a custom category. The application verifies that the channel is in the same Discord server and readable by the bot. The bot also needs Send Messages and Embed Links for delivery.
 
 The category channel takes priority over the default announcement channel. Without an override, the default channel is used. If neither exists, no bot delivery is queued. A blank category channel removes that override. Channel changes affect future jobs; existing bot jobs retain their original channel, including retries.
 
-Each webhook has an independent **Category filter**: all categories, uncategorized only, or one category. Automatic and manual webhook sends both respect it. Multiple matching destinations each receive a delivery. Existing webhooks default to all categories. Changing a filter can leave older, nonmatching queued jobs paused until they match again; it never moves them to a different webhook. Bot routing and webhooks are independent: enabling both can intentionally publish twice to the same destination.
+Each webhook has an independent **Category filter** (all categories, uncategorized only, one category, or any combination of categories) plus optional comma-separated **Include tags** (at least one tag must match) and **Exclude tags** (posts with any blocked tag are skipped). Automatic and manual webhook sends both respect category and tag filters; when automatic AI tagging is enabled, tag filters are evaluated after tagging finishes, marking non-matching queued jobs as `skipped`. Managers can verify connectivity anytime using the **Test webhook** action. Multiple matching destinations each receive a delivery. Existing webhooks default to all categories. Changing a filter can leave older, nonmatching queued jobs paused until they match again; it never moves them to a different webhook. Bot routing and webhooks are independent: enabling both can intentionally publish twice to the same destination.
 
 The library supports category and exact tag filters. Artist lists also support category filtering. Categories remain part of OPML exports; post tags and destination configuration do not.
 
